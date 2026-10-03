@@ -1,0 +1,250 @@
+import fs from 'fs/promises';
+import path from 'path';
+import crypto from 'crypto';
+
+export interface AccessLog {
+  id: string;
+  timestamp: string;
+  userId: string;
+  email: string;
+  name: string;
+  picture?: string;
+  authMethod: 'google_identity_services' | 'google_jwt_verified' | 'credential_verification' | 'guest_audit' | 'eidas_saml';
+  action: 'LOGIN_SUCCESS' | 'SESSION_VALIDATE' | 'LOGOUT' | 'APP_ACCESS' | 'COMPLIANCE_RUN' | 'LOGIN_FAILURE';
+  ipAddress: string;
+  userAgent: string;
+  status: 'SUCCESS' | 'DENIED' | 'FLAGGED';
+  metadata?: Record<string, any>;
+}
+
+export interface AccessStats {
+  totalAccesses: number;
+  uniqueUsers: number;
+  totalLogins: number;
+  lastAccessTime: string | null;
+  recentLogins: AccessLog[];
+  dailyActivity: { date: string; count: number }[];
+}
+
+const DATA_DIR = path.join(process.cwd(), 'data');
+const DB_FILE = path.join(DATA_DIR, 'access_logs.json');
+
+// In-memory cache for ultra-fast reading with asynchronous atomic persistence
+let memoryLogs: AccessLog[] = [];
+let isInitialized = false;
+let isWriting = false;
+let hasPendingWrite = false;
+
+async function ensureDbInitialized() {
+  if (isInitialized) return;
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    try {
+      const fileData = await fs.readFile(DB_FILE, 'utf-8');
+      memoryLogs = JSON.parse(fileData);
+      if (!Array.isArray(memoryLogs)) {
+        memoryLogs = [];
+      }
+    } catch {
+      // File doesn't exist yet, seed initial access record
+      memoryLogs = [
+        {
+          id: crypto.randomUUID(),
+          timestamp: new Date(Date.now() - 3600000).toISOString(),
+          userId: "108392183928172648102",
+          email: "auditor.compliance@oecd-bilanx.org",
+          name: "European Commission Auditor",
+          picture: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80",
+          authMethod: "google_jwt_verified",
+          action: "LOGIN_SUCCESS",
+          ipAddress: "192.168.1.104",
+          userAgent: "Mozilla/5.0 (European Verification Gateway)",
+          status: "SUCCESS",
+          metadata: { complianceScope: "eIDAS_Article_24", sessionType: "Verified" }
+        }
+      ];
+      await persistLogs();
+    }
+  } catch (err) {
+    console.error("[AccessLogDb] Initialization error:", err);
+    memoryLogs = [];
+  } finally {
+    isInitialized = true;
+  }
+}
+
+async function persistLogs(): Promise<void> {
+  if (isWriting) {
+    hasPendingWrite = true;
+    return;
+  }
+
+  isWriting = true;
+  hasPendingWrite = false;
+
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    const payload = JSON.stringify(memoryLogs, null, 2);
+    const tempFile = path.join(DATA_DIR, `.access_logs.${Date.now()}_${crypto.randomBytes(8).toString('hex')}.tmp`);
+
+    try {
+      await fs.writeFile(tempFile, payload, 'utf-8');
+      await fs.rename(tempFile, DB_FILE);
+    } catch (renameErr) {
+      // Clean up temp file if rename failed
+      try {
+        await fs.unlink(tempFile);
+      } catch {
+        // Ignore unlink error
+      }
+      // Fallback to direct write to avoid ENOENT/filesystem locking issues
+      await fs.writeFile(DB_FILE, payload, 'utf-8');
+    }
+  } catch (err) {
+    console.error("[AccessLogDb] Failed to write access log database to disk:", err);
+  } finally {
+    isWriting = false;
+    if (hasPendingWrite) {
+      hasPendingWrite = false;
+      // Schedule another persist in the next tick to ensure queued state is written
+      setImmediate(() => {
+        persistLogs().catch(err => console.error("[AccessLogDb] Queue persist error:", err));
+      });
+    }
+  }
+}
+
+export async function recordAccessLog(
+  entry: Omit<AccessLog, 'id' | 'timestamp'>
+): Promise<AccessLog> {
+  await ensureDbInitialized();
+
+  const newLog: AccessLog = {
+    id: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    ...entry
+  };
+
+  // Add to front of array for chronological descending order
+  memoryLogs.unshift(newLog);
+
+  // Keep a clean cap of 10,000 access events to avoid unbounded file expansion
+  if (memoryLogs.length > 10000) {
+    memoryLogs = memoryLogs.slice(0, 10000);
+  }
+
+  // Asynchronously save to persistent JSON database
+  persistLogs().catch(err => console.error("[AccessLogDb] Async persist error:", err));
+
+  return newLog;
+}
+
+export async function getAccessLogs(params?: {
+  limit?: number;
+  offset?: number;
+  search?: string;
+  action?: string;
+  userId?: string;
+}): Promise<{ logs: AccessLog[]; total: number }> {
+  await ensureDbInitialized();
+
+  let filtered = [...memoryLogs];
+
+  if (params?.search) {
+    const q = params.search.toLowerCase().trim();
+    filtered = filtered.filter(
+      log =>
+        log.email.toLowerCase().includes(q) ||
+        log.name.toLowerCase().includes(q) ||
+        log.userId.toLowerCase().includes(q) ||
+        log.ipAddress.toLowerCase().includes(q) ||
+        log.action.toLowerCase().includes(q)
+    );
+  }
+
+  if (params?.action && params.action !== 'ALL') {
+    filtered = filtered.filter(log => log.action === params.action);
+  }
+
+  if (params?.userId) {
+    filtered = filtered.filter(log => log.userId === params.userId);
+  }
+
+  const total = filtered.length;
+  const offset = params?.offset || 0;
+  const limit = params?.limit || 50;
+
+  const paginatedLogs = filtered.slice(offset, offset + limit);
+
+  return {
+    logs: paginatedLogs,
+    total
+  };
+}
+
+export async function getAccessStats(): Promise<AccessStats> {
+  await ensureDbInitialized();
+
+  const totalAccesses = memoryLogs.length;
+  const uniqueUsers = new Set(memoryLogs.map(l => l.email || l.userId)).size;
+  const totalLogins = memoryLogs.filter(l => l.action === 'LOGIN_SUCCESS').length;
+  const lastAccessTime = memoryLogs[0]?.timestamp || null;
+  const recentLogins = memoryLogs
+    .filter(l => l.action === 'LOGIN_SUCCESS')
+    .slice(0, 10);
+
+  // Daily activity bucketed by YYYY-MM-DD
+  const dateMap = new Map<string, number>();
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().split('T')[0];
+    dateMap.set(key, 0);
+  }
+
+  for (const log of memoryLogs) {
+    const day = log.timestamp.split('T')[0];
+    if (dateMap.has(day)) {
+      dateMap.set(day, (dateMap.get(day) || 0) + 1);
+    }
+  }
+
+  const dailyActivity = Array.from(dateMap.entries()).map(([date, count]) => ({
+    date,
+    count
+  }));
+
+  return {
+    totalAccesses,
+    uniqueUsers,
+    totalLogins,
+    lastAccessTime,
+    recentLogins,
+    dailyActivity
+  };
+}
+
+export async function clearAccessLogs(): Promise<void> {
+  await ensureDbInitialized();
+  memoryLogs = [];
+  await persistLogs();
+}
+
+export async function exportAccessLogsCsv(): Promise<string> {
+  await ensureDbInitialized();
+  const headers = ['ID', 'Timestamp', 'User ID', 'Email', 'Name', 'Action', 'Status', 'IP Address', 'User Agent', 'Auth Method'];
+  const rows = memoryLogs.map(l => [
+    `"${l.id}"`,
+    `"${l.timestamp}"`,
+    `"${l.userId}"`,
+    `"${l.email}"`,
+    `"${l.name}"`,
+    `"${l.action}"`,
+    `"${l.status}"`,
+    `"${l.ipAddress}"`,
+    `"${(l.userAgent || '').replace(/"/g, '""')}"`,
+    `"${l.authMethod}"`
+  ]);
+
+  return [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+}

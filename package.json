@@ -1,0 +1,49 @@
+{
+  "name": "react-example",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs --define:import.meta='{}'",
+    "start": "node dist/server.cjs",
+    "clean": "rm -rf dist",
+    "lint": "tsc --noEmit",
+    "test": "npm run test:all",
+    "test:all": "python3 -m unittest saml_engine/test_engine.py && npx tsx tests/saml_e2e_server_test.ts && npx tsx src/sandbox/tests/b2_acceptance_harness.ts && npx tsx src/sandbox/tests/e2e_dualkey_agegate_harness.ts && npx tsx tests/webauthn_e2e_test.ts",
+    "test:saml": "python3 -m unittest saml_engine/test_engine.py && npx tsx tests/saml_e2e_server_test.ts",
+    "test:zkp": "npx tsx src/sandbox/tests/b2_acceptance_harness.ts",
+    "test:dualkey": "npx tsx src/sandbox/tests/e2e_dualkey_agegate_harness.ts",
+    "test:webauthn": "npx tsx tests/webauthn_e2e_test.ts"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.2.0",
+    "@tailwindcss/vite": "^4.1.14",
+    "@vitejs/plugin-react": "^5.0.4",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "google-auth-library": "^11.0.2",
+    "jspdf": "^4.2.1",
+    "lucide-react": "^0.546.0",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "recharts": "^3.9.2",
+    "vite": "^6.2.3"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "autoprefixer": "^10.4.21",
+    "esbuild": "^0.25.0",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2"
+  },
+  "overrides": {
+    "nanoid": "^3.3.18",
+    "postcss": "^8.5.23",
+    "browserslist": "^4.28.7",
+    "qs": "^6.15.4",
+    "body-parser": "^1.20.7"
+  }
+}
