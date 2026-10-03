@@ -1,0 +1,25 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Cryptographic Keys, Certificates, and Keystores (REM-01)
+institutional-key.json
+*.key.json
+*.key
+*.pem
+*.crt
+!saml_engine/certs/*.crt
+*.cert
+*.p12
+*.pfx
+secrets/
+
+# Runtime Data and Access Logs
+data/
+*.sqlite
+*.db

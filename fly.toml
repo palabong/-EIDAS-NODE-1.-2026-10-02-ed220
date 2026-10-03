@@ -1,0 +1,22 @@
+# fly.toml app configuration file generated for eidas-node-1-2026-10-02-ed220-black-water-1048 on 2026-10-03T20:24:05+02:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'eidas-node-1-2026-10-02-ed220-black-water-1048'
+primary_region = 'fra'
+
+[build]
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
