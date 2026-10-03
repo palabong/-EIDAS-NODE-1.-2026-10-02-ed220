@@ -5,3 +5,10 @@ node_modules
 dist
 npm-debug.log*
 *.log
+.antigravity
+.agents
+_archive
+.vscode
+.gitignore
+.DS_Store
+**/*.md
