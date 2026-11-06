@@ -15,7 +15,12 @@ import {
   BarChart2
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
-import { useDualKeyValidation, HandshakeState, DualKeyValidationResult } from './hooks/useDualKeyValidation';
+import { 
+  useBilanxDualKeyValidationReal, 
+  HandshakeState, 
+  DualKeyValidationResult 
+} from './hooks/useBilanxDualKeyValidation.real';
+import { useBilanxDualKeyValidation as useMock } from './mocks/useBilanxDualKeyValidation.mock';
 
 // Utility for rendering badges
 const StatusBadge = ({ label, success }: { label: string; success?: boolean }) => {
@@ -57,9 +62,9 @@ export function SandboxCryptoComparison() {
   const [institutionId, setInstitutionId] = useState('INST-8472-BX');
   const [secondFactorId, setSecondFactorId] = useState('RFID-9932-AX');
   
-  // By maintaining two separate instances, each preserves its own historical state automatically.
-  const mockValidation = useDualKeyValidation({ useRealCrypto: false });
-  const realValidation = useDualKeyValidation({ useRealCrypto: true });
+  // Maintain two dedicated instances without double-instantiation overhead
+  const mockValidation = useMock();
+  const realValidation = useBilanxDualKeyValidationReal();
 
   const isMockRunning = mockValidation.state !== 'IDLE' && mockValidation.state !== 'COMPLETED' && mockValidation.state !== 'FAILED';
   const isRealRunning = realValidation.state !== 'IDLE' && realValidation.state !== 'COMPLETED' && realValidation.state !== 'FAILED';

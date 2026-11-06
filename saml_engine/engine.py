@@ -8,6 +8,7 @@ import tempfile
 import subprocess
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List, Tuple, Set
+import xml.parsers.expat
 import xml.etree.ElementTree as ET
 import fcntl
 
@@ -57,21 +58,42 @@ class SecureXMLParser:
     Parses XML strictly enforcing security controls:
     1. Disallows external entities (XXE).
     2. Disallows inline DTD declarations (to avoid Billion Laughs XML bomb attacks).
-    3. Handles whitespace, line endings, and case variations.
+    3. Enforces DTD and entity blocking via xml.parsers.expat before handoff to xml.etree.
     """
-    _DTD_REGEX = re.compile(r"<!\s*(DOCTYPE|ENTITY)", re.IGNORECASE)
 
     @classmethod
-    def parse_string(cls, xml_string: str) -> ET.Element:
-        if not xml_string or not isinstance(xml_string, str):
+    def parse_string(cls, xml_input: Any) -> ET.Element:
+        if not xml_input or not isinstance(xml_input, (str, bytes)):
             raise ValueError("Invalid XML input: Empty or non-string payload.")
 
-        # Pre-check for DTD and ENTITY injection
-        if cls._DTD_REGEX.search(xml_string):
+        if isinstance(xml_input, str):
+            xml_bytes = xml_input.strip().encode("utf-8")
+        elif isinstance(xml_input, bytes):
+            xml_bytes = xml_input.strip()
+        else:
+            raise ValueError("Invalid XML input: Empty or non-string payload.")
+
+        if not xml_bytes:
+            raise ValueError("Invalid XML input: Empty or non-string payload.")
+
+        # Expat DTD gate: Disallow DOCTYPE, entity, and external entity declarations
+        parser = xml.parsers.expat.ParserCreate()
+
+        def forbid_dtd(*args, **kwargs):
             raise ValueError("Security Violation: DTD declarations or external entities are forbidden.")
 
+        parser.StartDoctypeDeclHandler = forbid_dtd
+        parser.EntityDeclHandler = forbid_dtd
+        parser.ExternalEntityRefHandler = forbid_dtd
+
         try:
-            return ET.fromstring(xml_string.strip())
+            parser.Parse(xml_bytes, True)
+        except xml.parsers.expat.ExpatError as ee:
+            raise ValueError(f"XML Parse Error: {str(ee)}")
+
+        # Hand bytes to xml.etree only if no DTD was declared
+        try:
+            return ET.fromstring(xml_bytes)
         except ET.ParseError as pe:
             raise ValueError(f"XML Parse Error: {str(pe)}")
 
@@ -276,7 +298,10 @@ class XMLSignatureVerifier:
             if line.strip() and not line.startswith("-----")
         ]
         b64_content = "".join(clean_lines)
-        der_bytes = base64.b64decode(b64_content)
+        try:
+            der_bytes = base64.b64decode(b64_content, validate=True)
+        except Exception as e:
+            raise ValueError(f"Malformed Base64 in certificate: {str(e)}")
         return hashlib.sha256(der_bytes).hexdigest().upper()
 
     @classmethod
@@ -292,48 +317,46 @@ class XMLSignatureVerifier:
         Verifies the XML-DSig signature on or within target_element.
         Returns: (is_valid, message, cert_info)
         """
-        # Find Signature element (must be direct child of target_element or root)
-        sig_elem = None
-        for child in list(target_element):
-            if child.tag.endswith("Signature") and (child.tag.startswith(f"{{{NS_DS}}}") or "Signature" in child.tag):
-                sig_elem = child
-                break
+        # Strict XSW Defense: Reject multiple Signature elements in target or root
+        target_sig_elems = [c for c in list(target_element) if c.tag.endswith("Signature") and (c.tag.startswith(f"{{{NS_DS}}}") or "Signature" in c.tag)]
+        if len(target_sig_elems) > 1:
+            return SignatureResult(False, "XSW Defense Violation: Multiple ds:Signature elements detected in target element.", None)
 
-        if sig_elem is None:
-            # Check if root has Signature
-            for child in list(root):
-                if child.tag.endswith("Signature") and (child.tag.startswith(f"{{{NS_DS}}}") or "Signature" in child.tag):
-                    sig_elem = child
-                    break
+        root_sig_elems = [c for c in list(root) if c.tag.endswith("Signature") and (c.tag.startswith(f"{{{NS_DS}}}") or "Signature" in c.tag)]
+        if len(root_sig_elems) > 1:
+            return SignatureResult(False, "XSW Defense Violation: Multiple ds:Signature elements detected in root element.", None)
 
+        sig_elem = target_sig_elems[0] if target_sig_elems else (root_sig_elems[0] if root_sig_elems else None)
         if sig_elem is None:
             return SignatureResult(False, "Missing ds:Signature element.", None)
 
-        # 1. Parse SignedInfo
-        signed_info_elem = None
-        signature_value_b64 = None
-        x509_cert_b64 = None
-
-        for child in sig_elem:
-            tag = child.tag
-            if tag.endswith("SignedInfo"):
-                signed_info_elem = child
-            elif tag.endswith("SignatureValue"):
-                signature_value_b64 = (child.text or "").strip()
-            elif tag.endswith("KeyInfo"):
-                for ki_child in child.iter():
-                    if ki_child.tag.endswith("X509Certificate") and ki_child.text:
-                        x509_cert_b64 = "".join(ki_child.text.split())
-
-        if signed_info_elem is None:
+        # 1. Parse SignedInfo & KeyInfo with multiplicity protection
+        signed_infos = [c for c in sig_elem if c.tag.endswith("SignedInfo")]
+        if len(signed_infos) > 1:
+            return SignatureResult(False, "XSW Defense Violation: Multiple ds:SignedInfo elements detected in signature.", None)
+        if not signed_infos:
             return SignatureResult(False, "Missing ds:SignedInfo in signature.", None)
-        if not signature_value_b64:
+        signed_info_elem = signed_infos[0]
+
+        sig_values = [c for c in sig_elem if c.tag.endswith("SignatureValue")]
+        if len(sig_values) > 1:
+            return SignatureResult(False, "XSW Defense Violation: Multiple ds:SignatureValue elements detected in signature.", None)
+        if not sig_values or not (sig_values[0].text or "").strip():
             return SignatureResult(False, "Missing or empty ds:SignatureValue.", None)
+        signature_value_b64 = (sig_values[0].text or "").strip()
+
+        key_infos = [c for c in sig_elem if c.tag.endswith("KeyInfo")]
+        if len(key_infos) > 1:
+            return SignatureResult(False, "XSW Defense Violation: Multiple ds:KeyInfo elements detected in signature.", None)
+        x509_cert_b64 = None
+        if key_infos:
+            for ki_child in key_infos[0].iter():
+                if ki_child.tag.endswith("X509Certificate") and ki_child.text:
+                    x509_cert_b64 = "".join(ki_child.text.split())
         if not x509_cert_b64:
             return SignatureResult(False, "Missing ds:X509Certificate in ds:KeyInfo.", None)
 
         # 2. Parse Reference & Digest in SignedInfo
-        reference_elem = None
         canonicalization_method = None
         signature_method = None
 
@@ -342,11 +365,11 @@ class XMLSignatureVerifier:
                 canonicalization_method = child.attrib.get("Algorithm")
             elif child.tag.endswith("SignatureMethod"):
                 signature_method = child.attrib.get("Algorithm")
-            elif child.tag.endswith("Reference"):
-                reference_elem = child
 
-        if reference_elem is None:
-            return SignatureResult(False, "Missing ds:Reference in ds:SignedInfo.", None)
+        reference_elems = [c for c in signed_info_elem if c.tag.endswith("Reference")]
+        if len(reference_elems) != 1:
+            return SignatureResult(False, f"XSW Defense Violation: Expected exactly 1 ds:Reference in ds:SignedInfo, found {len(reference_elems)}.", None)
+        reference_elem = reference_elems[0]
 
         ref_uri = reference_elem.attrib.get("URI", "")
         # Remove leading '#' if present
@@ -359,15 +382,15 @@ class XMLSignatureVerifier:
         if actual_target_id and target_id_ref != actual_target_id:
             return SignatureResult(False, f"XSW Defense Violation: Signature Reference URI '{ref_uri}' does not match target element ID '{actual_target_id}'.", None)
 
-        # Extract expected DigestValue
-        expected_digest_b64 = None
-        for child in reference_elem:
-            if child.tag.endswith("DigestValue") and child.text:
-                expected_digest_b64 = child.text.strip()
-                break
-
-        if not expected_digest_b64:
-            return SignatureResult(False, "Missing ds:DigestValue in ds:Reference.", None)
+        # Extract expected DigestValue with strict multiplicity & base64 checks
+        digest_val_elems = [c for c in reference_elem if c.tag.endswith("DigestValue") and c.text]
+        if len(digest_val_elems) != 1:
+            return SignatureResult(False, f"XSW Defense Violation: Expected exactly 1 ds:DigestValue in ds:Reference, found {len(digest_val_elems)}.", None)
+        expected_digest_b64 = digest_val_elems[0].text.strip()
+        try:
+            base64.b64decode(expected_digest_b64, validate=True)
+        except Exception as e:
+            return SignatureResult(False, f"Malformed Base64 in ds:DigestValue: {str(e)}", None)
 
         # 3. Canonicalize target element with enveloped signature removed
         # Detach sig_elem temporarily
@@ -393,7 +416,10 @@ class XMLSignatureVerifier:
 
         # 5. Verify Cryptographic Signature with Certificate
         cert_pem = f"-----BEGIN CERTIFICATE-----\n{x509_cert_b64}\n-----END CERTIFICATE-----\n"
-        sig_bytes = base64.b64decode(signature_value_b64)
+        try:
+            sig_bytes = base64.b64decode(signature_value_b64, validate=True)
+        except Exception as e:
+            return SignatureResult(False, f"Cryptographic Verification Failed: Malformed Base64 in SignatureValue ({str(e)})", None)
 
         try:
             cert_fp = cls.compute_cert_fingerprint(x509_cert_b64)

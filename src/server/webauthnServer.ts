@@ -29,6 +29,12 @@ export interface StoredWebAuthnCredential {
   counter: number;
   createdAt: string;
   authenticatorAttachment: string;
+  aaguid?: string;
+  deviceName?: string;
+  attestationFormat?: string;
+  userVerified?: boolean;
+  userPresent?: boolean;
+  compromised?: boolean;
 }
 
 export interface WebAuthnChallengeRecord {
@@ -46,6 +52,7 @@ export interface RegisterCredentialParams {
   authenticatorAttachment?: string;
   expectedOrigin?: string;
   expectedRpId?: string;
+  requireUserVerification?: boolean;
 }
 
 export interface VerifyAssertionParams {
@@ -55,12 +62,49 @@ export interface VerifyAssertionParams {
   signatureB64: string;
   expectedOrigin?: string;
   expectedRpId?: string;
+  requireUserVerification?: boolean;
 }
 
 export interface WebAuthnVerifyResult {
   verified: boolean;
   credential?: StoredWebAuthnCredential;
+  userVerified?: boolean;
+  userPresent?: boolean;
+  aaguid?: string;
+  deviceName?: string;
+  authenticatorAttachment?: string;
+  counter?: number;
   error?: string;
+}
+
+// ---------------------------------------------------------------------------
+// AAGUID Identification & Device Registry
+// ---------------------------------------------------------------------------
+
+export const KNOWN_AAGUIDS: Record<string, string> = {
+  'ee882879-721c-4916-ad4e-57c7f15f6f19': 'YubiKey 5 Series (NFC / USB)',
+  '2fc0579f-8113-47ea-b116-bb5a8db9202a': 'YubiKey 5 NFC',
+  'cb69481e-8ff7-4039-93ec-0a2729a1e67d': 'YubiKey 5Ci',
+  'fa2b99dc-9e39-4257-8f92-4a30d23c4118': 'YubiKey 5 Series (Lightning / USB-C)',
+  'c167093b-01ec-4e5b-b9d9-ae798c874b34': 'Yubico Security Key NFC',
+  '08987058-cadc-4b81-b6e1-30c50432bb21': 'Google Titan Security Key',
+  '00000000-0000-0000-0000-000000000000': 'Platform Authenticator / Simulator',
+  'adce0002-35bc-c60a-648b-0b25f1f05503': 'Windows Hello Hardware Authenticator',
+  '7499aa65-da2d-4530-80ea-311fe5270146': 'Apple Secure Enclave (Touch ID / Face ID)',
+  'dd4ec289-e01d-41c9-bb89-70fa845d4bf2': 'Apple Passkey / iCloud Keychain',
+};
+
+export function formatAaguid(buf: Buffer): string {
+  if (!buf || buf.length < 16) return '00000000-0000-0000-0000-000000000000';
+  const hex = buf.subarray(0, 16).toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`.toLowerCase();
+}
+
+export function identifyAaguid(aaguid: string): { aaguid: string; deviceName: string; isHardwareKey: boolean } {
+  const norm = aaguid.toLowerCase();
+  const deviceName = KNOWN_AAGUIDS[norm] || (norm === '00000000-0000-0000-0000-000000000000' ? 'Platform Authenticator / Simulator' : 'CTAP2 Hardware Security Token');
+  const isHardwareKey = norm.startsWith('ee882879') || norm.startsWith('2fc0579f') || norm.startsWith('cb69481e') || norm.startsWith('fa2b99dc') || norm.startsWith('c167093b') || norm.startsWith('08987058');
+  return { aaguid: norm, deviceName, isHardwareKey };
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +112,8 @@ export interface WebAuthnVerifyResult {
 // ---------------------------------------------------------------------------
 
 const CHALLENGE_TTL_MS = 120_000; // 2 minutes
+export const MAX_ACTIVE_WEBAUTHN_CHALLENGES = 5_000;
+export const MAX_STORED_CREDENTIALS = 10_000;
 const activeWebAuthnChallenges = new Map<string, WebAuthnChallengeRecord>();
 const registeredWebAuthnCredentials = new Map<string, StoredWebAuthnCredential>();
 
@@ -342,6 +388,22 @@ export function rawSignatureToDer(sig: Buffer): Buffer {
   ]);
 }
 
+/**
+ * Validates whether a buffer conforms to the ASN.1 DER SEQUENCE structure for ECDSA P-256 signatures.
+ */
+export function isDerSignature(sig: Buffer): boolean {
+  if (sig.length < 8 || sig.length > 74) return false;
+  if (sig[0] !== 0x30) return false;
+  if (sig[1] !== sig.length - 2) return false;
+  if (sig[2] !== 0x02) return false;
+  const lenR = sig[3];
+  if (4 + lenR >= sig.length) return false;
+  if (sig[4 + lenR] !== 0x02) return false;
+  const lenS = sig[5 + lenR];
+  if (6 + lenR + lenS !== sig.length) return false;
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Public Key Transpilation (COSE Key -> SPKI PEM)
 // ---------------------------------------------------------------------------
@@ -430,6 +492,7 @@ function isOriginAllowed(receivedOrigin: string, expectedOrigin?: string, expect
  * Generates a cryptographic WebAuthn challenge string (32 bytes base64url)
  */
 export function generateWebAuthnChallenge(): string {
+  purgeExpiredChallenges();
   const bytes = crypto.randomBytes(32);
   const challenge = bytes.toString('base64url');
   activeWebAuthnChallenges.set(challenge, { challenge, issuedAt: Date.now() });
@@ -444,6 +507,48 @@ export function getStoredCredential(credentialId: string): StoredWebAuthnCredent
 }
 
 /**
+ * Revokes a stored credential permanently (marking it compromised)
+ */
+export function revokeStoredCredential(credentialId: string, reason?: string): boolean {
+  const cred = registeredWebAuthnCredentials.get(credentialId);
+  if (!cred) return false;
+  cred.compromised = true;
+  return true;
+}
+
+/**
+ * Deletes a stored credential record
+ */
+export function deleteStoredCredential(credentialId: string): boolean {
+  return registeredWebAuthnCredentials.delete(credentialId);
+}
+
+/**
+ * Lists all stored credentials (optionally filtered by username)
+ */
+export function listStoredCredentials(username?: string): StoredWebAuthnCredential[] {
+  const creds = Array.from(registeredWebAuthnCredentials.values());
+  if (username) {
+    return creds.filter(c => c.username === username);
+  }
+  return creds;
+}
+
+/**
+ * Returns total count of registered credentials
+ */
+export function getStoredCredentialsCount(): number {
+  return registeredWebAuthnCredentials.size;
+}
+
+/**
+ * Returns total count of currently active challenges
+ */
+export function getActiveChallengesCount(): number {
+  return activeWebAuthnChallenges.size;
+}
+
+/**
  * Clears stored credentials and challenges (for tests)
  */
 export function clearWebAuthnState(): void {
@@ -452,13 +557,22 @@ export function clearWebAuthnState(): void {
 }
 
 /**
- * Internal clean-up of expired challenges
+ * Internal clean-up of expired challenges with bounded capacity eviction
  */
-function purgeExpiredChallenges(): void {
+export function purgeExpiredChallenges(): void {
   const now = Date.now();
   for (const [key, record] of activeWebAuthnChallenges.entries()) {
     if (now - record.issuedAt > CHALLENGE_TTL_MS) {
       activeWebAuthnChallenges.delete(key);
+    }
+  }
+  if (activeWebAuthnChallenges.size > MAX_ACTIVE_WEBAUTHN_CHALLENGES) {
+    const toDelete = activeWebAuthnChallenges.size - MAX_ACTIVE_WEBAUTHN_CHALLENGES;
+    let deleted = 0;
+    for (const key of activeWebAuthnChallenges.keys()) {
+      activeWebAuthnChallenges.delete(key);
+      deleted++;
+      if (deleted >= toDelete) break;
     }
   }
 }
@@ -489,7 +603,7 @@ export function registerWebAuthnCredential(
     };
   }
 
-  const {
+    const {
     credentialId,
     username,
     clientDataJSONB64,
@@ -497,7 +611,8 @@ export function registerWebAuthnCredential(
     publicKeyPem: directPublicKeyPem,
     authenticatorAttachment = 'platform',
     expectedOrigin,
-    expectedRpId
+    expectedRpId,
+    requireUserVerification
   } = params;
 
   if (!credentialId) {
@@ -537,8 +652,13 @@ export function registerWebAuthnCredential(
     }
   }
 
-  // 4. Extract Public Key
+  // 4. Extract Public Key & Attestation Metadata
   let resolvedPublicKeyPem = '';
+  let aaguidFormatted = '00000000-0000-0000-0000-000000000000';
+  let deviceName = 'Platform Authenticator / Simulator';
+  let attestationFormat = 'none';
+  let userVerified = false;
+  let userPresent = true;
 
   if (attestationObjectB64) {
     const attestationBuf = decodeBuffer(attestationObjectB64);
@@ -563,8 +683,14 @@ export function registerWebAuthnCredential(
 
     // Verify User Present (bit 0) and Attested Credential Data (bit 6)
     const flags = authDataBuf[32];
-    if ((flags & 0x01) === 0) {
+    userPresent = (flags & 0x01) !== 0;
+    userVerified = (flags & 0x04) !== 0;
+
+    if (!userPresent) {
       throw new Error('User presence flag (UP) not set in attestation authData');
+    }
+    if (requireUserVerification && !userVerified) {
+      throw new Error('User verification flag (UV) required but not set in attestation authData');
     }
     if ((flags & 0x40) === 0) {
       throw new Error('Attested credential data flag (AT) not set in attestation authData');
@@ -573,6 +699,11 @@ export function registerWebAuthnCredential(
     // Attested Credential Data starts at offset 37:
     // aaguid: 16 bytes (37..52)
     // credIdLen: 2 bytes (53..54)
+    const aaguidBuf = authDataBuf.subarray(37, 53);
+    aaguidFormatted = formatAaguid(aaguidBuf);
+    const idInfo = identifyAaguid(aaguidFormatted);
+    deviceName = idInfo.deviceName;
+
     const credIdLen = authDataBuf.readUInt16BE(53);
     const credIdEnd = 55 + credIdLen;
     if (authDataBuf.length < credIdEnd) {
@@ -586,6 +717,80 @@ export function registerWebAuthnCredential(
     }
 
     resolvedPublicKeyPem = coseKeyToPublicKeyPem(coseMap);
+
+    // Process Attestation Statement (fmt & attStmt)
+    attestationFormat = (attestationMap.get('fmt') as string) || 'none';
+    const attStmt = attestationMap.get('attStmt');
+
+    if (attestationFormat === 'none') {
+      // Direct registration without attestation statement (WebAuthn Level 3 standard)
+    } else if (attestationFormat === 'packed') {
+      if (!(attStmt instanceof Map)) {
+        throw new Error('Packed attestation statement missing or invalid');
+      }
+      const clientDataHash = crypto.createHash('sha256').update(clientDataBuf).digest();
+      const signedBytes = Buffer.concat([authDataBuf, clientDataHash]);
+      const sig = attStmt.get('sig');
+      const x5c = attStmt.get('x5c');
+
+      if (!sig || !Buffer.isBuffer(sig)) {
+        throw new Error('Packed attestation statement missing signature');
+      }
+
+      const derSig = (!isDerSignature(sig) && sig.length === 64) ? rawSignatureToDer(sig) : sig;
+
+      if (Array.isArray(x5c) && x5c.length > 0 && Buffer.isBuffer(x5c[0])) {
+        // Full attestation via X.509 certificate chain
+        try {
+          const cert = new crypto.X509Certificate(x5c[0]);
+
+          // 1. Verify temporal validity of leaf attestation certificate
+          const now = new Date();
+          const validFrom = cert.validFromDate ?? new Date(cert.validFrom);
+          const validTo = cert.validToDate ?? new Date(cert.validTo);
+          if (now < validFrom || now > validTo) {
+            throw new Error(`Attestation certificate expired or not yet valid (valid from ${cert.validFrom} to ${cert.validTo})`);
+          }
+
+          // 2. If chain is present (x5c.length > 1), verify trust chain continuity
+          for (let i = 0; i < x5c.length - 1; i++) {
+            if (!Buffer.isBuffer(x5c[i]) || !Buffer.isBuffer(x5c[i + 1])) {
+              throw new Error(`Invalid certificate element in attestation chain at index ${i}`);
+            }
+            const childCert = new crypto.X509Certificate(x5c[i]);
+            const parentCert = new crypto.X509Certificate(x5c[i + 1]);
+            const parentValidFrom = parentCert.validFromDate ?? new Date(parentCert.validFrom);
+            const parentValidTo = parentCert.validToDate ?? new Date(parentCert.validTo);
+            if (now < parentValidFrom || now > parentValidTo) {
+              throw new Error(`Intermediate/root attestation certificate expired or not yet valid (valid from ${parentCert.validFrom} to ${parentCert.validTo})`);
+            }
+            if (!childCert.verify(parentCert.publicKey)) {
+              throw new Error(`Attestation certificate chain verification failed at certificate ${i}`);
+            }
+          }
+
+          // 3. Verify signature over signedBytes using leaf certificate public key
+          const verified = crypto.verify('SHA256', signedBytes, cert.publicKey, derSig);
+          if (!verified) {
+            throw new Error('Packed attestation certificate chain signature verification failed');
+          }
+        } catch (err: any) {
+          throw new Error(`Packed attestation certificate verification error: ${err.message}`);
+        }
+      } else {
+        // Self-attestation / surrogate attestation signed with the credential's own key
+        try {
+          const verified = crypto.verify('SHA256', signedBytes, resolvedPublicKeyPem, derSig);
+          if (!verified) {
+            throw new Error('Packed self-attestation signature verification failed');
+          }
+        } catch (err: any) {
+          throw new Error(`Packed self-attestation verification error: ${err.message}`);
+        }
+      }
+    } else {
+      throw new Error(`Unsupported attestation format '${attestationFormat}'`);
+    }
   } else if (directPublicKeyPem) {
     // Allow direct PEM / SPKI if supplied (e.g. from tests or pre-parsed clients)
     try {
@@ -598,14 +803,38 @@ export function registerWebAuthnCredential(
     throw new Error('Missing attestationObject or publicKeyPem in registration payload');
   }
 
-  // 5. Store Credential Record
+  // 5. Duplicate & Revoked Credential Defense
+  if (registeredWebAuthnCredentials.has(credentialId)) {
+    const existing = registeredWebAuthnCredentials.get(credentialId)!;
+    if (existing.compromised) {
+      throw new Error(`Credential '${credentialId}' has been revoked due to security violation and cannot be re-registered`);
+    }
+    throw new Error(`Credential '${credentialId}' is already registered`);
+  }
+
+  // Enforce bounded storage capacity under DDoS registration attacks
+  if (registeredWebAuthnCredentials.size >= MAX_STORED_CREDENTIALS) {
+    for (const [id, cred] of registeredWebAuthnCredentials.entries()) {
+      if (!cred.compromised) {
+        registeredWebAuthnCredentials.delete(id);
+        break;
+      }
+    }
+  }
+
+  // 6. Store Credential Record
   const credential: StoredWebAuthnCredential = {
     credentialId,
     publicKeyPem: resolvedPublicKeyPem,
     username,
     counter: 0,
     createdAt: new Date().toISOString(),
-    authenticatorAttachment
+    authenticatorAttachment: authenticatorAttachment || 'platform',
+    aaguid: aaguidFormatted,
+    deviceName,
+    attestationFormat,
+    userVerified,
+    userPresent
   };
 
   registeredWebAuthnCredentials.set(credentialId, credential);
@@ -649,6 +878,14 @@ export function verifyWebAuthnAssertion(
   const cred = registeredWebAuthnCredentials.get(credentialId);
   if (!cred) {
     return { verified: false, error: `Credential not found: ${credentialId}` };
+  }
+
+  // 1b. Fail-closed check for previously compromised / revoked credentials
+  if (cred.compromised) {
+    return {
+      verified: false,
+      error: 'Credential has been revoked due to previously detected clone / tampering attempt'
+    };
   }
 
   // 2. Decode & Verify clientDataJSON
@@ -705,22 +942,20 @@ export function verifyWebAuthnAssertion(
     }
   }
 
-  // 7. User Presence (UP) Flag Verification
+  // 7. User Presence (UP) & User Verification (UV) Flag Verification
   const flags = authDataBuf[32];
-  if ((flags & 0x01) === 0) {
+  const userPresent = (flags & 0x01) !== 0;
+  const userVerified = (flags & 0x04) !== 0;
+
+  if (!userPresent) {
     return { verified: false, error: 'User presence flag (UP) not set in authenticatorData' };
   }
 
-  // 8. Signature Counter (Anti-Cloning) Verification
-  const signCount = authDataBuf.readUInt32BE(33);
-  if ((cred.counter > 0 || signCount > 0) && signCount <= cred.counter) {
-    return {
-      verified: false,
-      error: `Cloned authenticator detected: signCount (${signCount}) did not increase past stored counter (${cred.counter})`
-    };
+  if (params.requireUserVerification && !userVerified) {
+    return { verified: false, error: 'User verification flag (UV) required but not set in authenticatorData' };
   }
 
-  // 9. Authentic ECDSA Signature Verification
+  // 8. Authentic ECDSA Signature Verification
   const clientDataHash = crypto.createHash('sha256').update(clientDataBuf).digest();
   const signedBytes = Buffer.concat([authDataBuf, clientDataHash]);
 
@@ -732,7 +967,7 @@ export function verifyWebAuthnAssertion(
   }
 
   // Auto-convert raw 64-byte IEEE P1363 signatures to standard ASN.1 DER if needed
-  const derSig = (sigBuf[0] !== 0x30 && sigBuf.length === 64) ? rawSignatureToDer(sigBuf) : sigBuf;
+  const derSig = (!isDerSignature(sigBuf) && sigBuf.length === 64) ? rawSignatureToDer(sigBuf) : sigBuf;
 
   let isValidSignature = false;
   try {
@@ -745,10 +980,41 @@ export function verifyWebAuthnAssertion(
     return { verified: false, error: 'Cryptographic signature verification failed' };
   }
 
-  // 10. Update Counter & Return Verified Credential
+  // 9. Compromised Credential Revocation Check
+  if (cred.compromised) {
+    return {
+      verified: false,
+      error: 'Credential has been revoked due to previously detected clone / tampering attempt'
+    };
+  }
+
+  // 10. Signature Counter (Anti-Cloning) Verification
+  const signCount = authDataBuf.readUInt32BE(33);
+  if ((cred.counter > 0 || signCount > 0) && signCount <= cred.counter) {
+    cred.compromised = true;
+    return {
+      verified: false,
+      error: `Cloned authenticator detected: signCount (${signCount}) did not increase past stored counter (${cred.counter})`
+    };
+  }
+  if (cred.authenticatorAttachment === 'cross-platform' && signCount <= cred.counter) {
+    cred.compromised = true;
+    return {
+      verified: false,
+      error: `Cloned authenticator detected: roaming hardware key signature counter (${signCount}) must strictly exceed stored counter (${cred.counter})`
+    };
+  }
+
+  // 11. Update Counter & Return Verified Credential
   cred.counter = signCount;
   return {
     verified: true,
-    credential: cred
+    credential: cred,
+    userVerified,
+    userPresent,
+    aaguid: cred.aaguid,
+    deviceName: cred.deviceName,
+    authenticatorAttachment: cred.authenticatorAttachment,
+    counter: cred.counter
   };
 }

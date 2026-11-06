@@ -159,10 +159,27 @@ export function AccessLogAuditModal({ isOpen, onClose }: AccessLogAuditModalProp
     }
   };
 
-  const handleExportCsv = () => {
+  const handleExportCsv = async () => {
     const userSession = localStorage.getItem('bilanx_verified_google_user');
     const token = userSession ? JSON.parse(userSession).sessionToken : '';
-    window.location.href = `/api/access-logs/export?token=${token}`;
+    try {
+      const res = await fetch('/api/access-logs/export', {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      if (!res.ok) throw new Error('Export request failed');
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `credentials_hub_access_logs_${Date.now()}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.warn('Direct CSV blob download failed, attempting fallback navigation:', err);
+      window.location.href = `/api/access-logs/export?token=${token}`;
+    }
   };
 
   if (!isOpen) return null;

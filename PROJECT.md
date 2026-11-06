@@ -1,5 +1,7 @@
 # Project: Bilanx / eIDAS Node (Remediation & TRL Hardening)
 
+> **Evidence Limits**: Evaluated at TRL 4 (lab-integrated components on fixtures and emulators). See [`docs/audit/GROUNDED_EVIDENCE_PACK.md`](docs/audit/GROUNDED_EVIDENCE_PACK.md) for empirical evidence and boundary matrices, and [`docs/audit/COMMENT_DRIFT.md`](docs/audit/COMMENT_DRIFT.md) for code comment drift.
+
 ## Overview
 Remediation of Project Bilanx / eIDAS Node addressing findings REM-01 through REM-11 from `AUDIT_REPORT.md`.
 Transitioning from insecure stubs and vulnerabilities to authentic cryptographic verification, secure credential management, dependency hygiene, and a unified automated test suite.

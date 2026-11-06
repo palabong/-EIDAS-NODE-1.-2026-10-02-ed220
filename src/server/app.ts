@@ -12,7 +12,7 @@ import { OAuth2Client } from 'google-auth-library';
 
 dotenv.config();
 
-import { verifyProof } from '../sandbox/lib/nizkp.ts';
+import { verifyProof } from '../lib/crypto/zkp/nizkp.ts';
 import { 
   recordAccessLog, 
   getAccessLogs, 
@@ -174,6 +174,25 @@ export interface ActiveChallengeRecord {
 }
 export const activeChallenges = new Map<string, ActiveChallengeRecord>();
 export const CHALLENGE_TTL_MS = 60_000; // 60 seconds validity window
+export const MAX_ACTIVE_INSTITUTIONAL_CHALLENGES = 5_000;
+
+export function purgeExpiredInstitutionalChallenges(): void {
+  const now = Date.now();
+  for (const [key, record] of activeChallenges.entries()) {
+    if (now - record.issuedAt > CHALLENGE_TTL_MS) {
+      activeChallenges.delete(key);
+    }
+  }
+  if (activeChallenges.size > MAX_ACTIVE_INSTITUTIONAL_CHALLENGES) {
+    const toDelete = activeChallenges.size - MAX_ACTIVE_INSTITUTIONAL_CHALLENGES;
+    let deleted = 0;
+    for (const key of activeChallenges.keys()) {
+      activeChallenges.delete(key);
+      deleted++;
+      if (deleted >= toDelete) break;
+    }
+  }
+}
 
 export async function getInstitutionalKeyPair(): Promise<webcrypto.CryptoKeyPair> {
   if (backendInstitutionalKeyPair) {
@@ -596,7 +615,7 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
 
       let samlResponse = req.body?.SAMLResponse || req.body?.saml_response || req.body?.xml_content || req.body?.samlResponse;
       if (!samlResponse && req.body?.preset) {
-        samlResponse = getPresetFixtureXml(req.body.preset);
+        samlResponse = await getPresetFixtureXml(req.body.preset);
       }
       const relayState = req.body?.RelayState || req.body?.relayState || '/';
 
@@ -670,35 +689,29 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
       const claims = validationResult.claims || {};
 
       const sessionUser: SessionUser = {
-        uid: posContext.user_id,
-        email: `${posContext.user_id.toLowerCase().replace(/[^a-z0-9]/g, '_')}@eidas.europa.eu`,
-        name: posContext.given_name && posContext.family_name
-          ? `${posContext.given_name} ${posContext.family_name}`
-          : `eIDAS User ${posContext.user_id}`,
+        uid: 'session-user',
+        email: 'verified@eidas.europa.eu',
+        name: 'eIDAS User',
         authMethod: 'eidas_saml',
         role: posContext.role,
         permissions: posContext.permissions,
         levelOfAssurance: posContext.level_of_assurance,
-        personIdentifier: posContext.user_id,
-        familyName: posContext.family_name,
-        givenName: posContext.given_name,
-        dateOfBirth: posContext.date_of_birth,
         age: posContext.age,
         isOver18: posContext.is_over_18,
         isOver21: posContext.is_over_21,
         authenticatedAt: new Date().toISOString(),
         expiresAt: Date.now() + 4 * 60 * 60 * 1000,
         issuer: claims.issuer,
-        posContext,
       };
 
       const { token: sessionToken } = globalSessionStore.createSession(sessionUser);
+      sessionUser.uid = sessionToken; // use session token as uid for logs
       setSessionCookie(res, sessionToken);
 
       await recordAccessLog({
-        userId: sessionUser.uid,
-        email: sessionUser.email,
-        name: sessionUser.name,
+        userId: sessionToken,
+        email: 'verified@eidas.europa.eu',
+        name: 'eIDAS User',
         authMethod: 'eidas_saml',
         action: 'LOGIN_SUCCESS',
         ipAddress: clientIp,
@@ -713,12 +726,21 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
         },
       });
 
+      const safePosContext = {
+        role: posContext.role,
+        permissions: posContext.permissions,
+        level_of_assurance: posContext.level_of_assurance,
+        age: posContext.age,
+        is_over_18: posContext.is_over_18,
+        is_over_21: posContext.is_over_21,
+      };
+
       res.json({
         success: true,
         relayState,
         sessionToken,
         user: sessionUser,
-        pos_context: posContext,
+        pos_context: safePosContext,
       });
 
     } catch (err: unknown) {
@@ -833,9 +855,12 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
       // Convert buffer to Base64 to send over JSON safely
       const signatureBase64 = Buffer.from(instSignatureBuffer).toString('base64');
       
-      // Simulate realistic network and processing latency (80-250ms)
-      const latency = Math.floor(Math.random() * (250 - 80 + 1)) + 80;
-      await new Promise(resolve => setTimeout(resolve, latency));
+      // Simulate realistic network and processing latency (80-250ms), bypassed during test execution
+      const isTestEnv = Boolean(options?.isTest || process.env.NODE_ENV === 'test');
+      const latency = isTestEnv ? 0 : Math.floor(Math.random() * (250 - 80 + 1)) + 80;
+      if (latency > 0) {
+        await new Promise(resolve => setTimeout(resolve, latency));
+      }
 
       // Register challenge in active challenge map for anti-replay tracking
       activeChallenges.set(challengeStr, {
@@ -845,13 +870,8 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
         institutionId: sanitizedInstitutionId
       });
 
-      // Periodic pruning of expired challenges (TTL cleanup > 5 minutes)
-      const now = Date.now();
-      for (const [key, record] of activeChallenges.entries()) {
-        if (now - record.issuedAt > 300_000) {
-          activeChallenges.delete(key);
-        }
-      }
+      // Bounded capacity & expired challenges pruning
+      purgeExpiredInstitutionalChallenges();
 
       console.log(`[Backend Mock] Successfully generated and signed challenge (Active nonces: ${activeChallenges.size}). Responding after ${latency}ms latency.`);
 
@@ -922,9 +942,10 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
     }
   });
 
-  // API Route 7: Bilanx DK-SVS Dual-Key Verify
-  app.post("/api/v1/dual-key/verify", async (req, res) => {
+  // API Route 7: Bilanx DK-SVS Dual-Key Verify & Institutional Challenge Verify
+  app.post(["/api/v1/dual-key/verify", "/api/institutional-challenge/verify"], async (req, res) => {
     try {
+      purgeExpiredInstitutionalChallenges();
       const payload = req.body;
       if (!payload || payload.v !== 1) {
         res.status(400).json({ valid: false, error: "Invalid payload or unsupported version" });
@@ -960,6 +981,10 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
         res.status(200).json({ valid: false, reason: "Challenge expired" });
         return;
       }
+
+      // Atomically consume challenge immediately BEFORE any asynchronous crypto operations
+      // to eliminate race conditions and prevent concurrent parallel replay attacks
+      challengeRecord.consumed = true;
 
       // 2. Server-Side Institutional Signature Verification
       const instKeyPair = await getInstitutionalKeyPair();
@@ -1019,8 +1044,6 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
       );
 
       if (isValid) {
-        // Mark challenge as consumed to prevent replay attacks
-        challengeRecord.consumed = true;
         res.status(200).json({ valid: true });
       } else {
         res.status(200).json({ valid: false, reason: "Signature verification failed" });
@@ -1031,12 +1054,25 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
     }
   });
 
-  // WebAuthn / Hardware Enclave API Endpoints (Phase 2 - TRL 5)
+  // WebAuthn / Hardware Enclave API Endpoints (TRL 6 Hybrid: Platform & Cross-Platform / YubiKey)
   app.post(['/api/webauthn/register-options', '/api/auth/webauthn/register-options'], (req, res) => {
     const username = req.body?.username || 'daniele.palagi92@gmail.com';
     const displayName = req.body?.displayName || 'Daniele Palagi';
     const challenge = generateWebAuthnChallenge();
     const rpId = req.hostname;
+    const attachment = req.body?.authenticatorAttachment || req.body?.attachment;
+    const residentKey = req.body?.residentKey || 'preferred';
+    const requireResidentKey = req.body?.requireResidentKey || false;
+    const userVerification = req.body?.userVerification || 'preferred';
+
+    const authenticatorSelection: any = {
+      userVerification,
+      residentKey,
+      requireResidentKey
+    };
+    if (attachment) {
+      authenticatorSelection.authenticatorAttachment = attachment;
+    }
 
     res.json({
       challenge,
@@ -1046,11 +1082,12 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
         { alg: -7, type: 'public-key' },  // ES256 (ECDSA P-256)
         { alg: -257, type: 'public-key' } // RS256 (RSA SHA-256)
       ],
-      authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'preferred' }
+      authenticatorSelection,
+      attestation: 'direct'
     });
   });
 
-  // Hardened WebAuthn Registration Verification (REM-03 / Task 1.2)
+  // Hardened WebAuthn Registration Verification (REM-03 / TRL 6)
   app.post(['/api/webauthn/register-verify', '/api/auth/webauthn/register-verify'], (req, res) => {
     try {
       const { credential, username } = req.body || {};
@@ -1065,6 +1102,7 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
         return;
       }
 
+      const requireUserVerification = req.body?.requireUserVerification === true || req.body?.userVerification === 'required';
       const stored = registerWebAuthnCredential({
         credentialId: credential.id,
         username: username || 'daniele.palagi92@gmail.com',
@@ -1072,9 +1110,10 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
         attestationObjectB64: credential.response.attestationObject,
         authenticatorDataB64: credential.response.authenticatorData,
         publicKeyPem: credential.response.publicKey,
-        authenticatorAttachment: credential.authenticatorAttachment || 'platform',
+        authenticatorAttachment: credential.authenticatorAttachment || req.body?.authenticatorAttachment || 'platform',
         expectedOrigin,
-        expectedRpId
+        expectedRpId,
+        requireUserVerification
       });
 
       res.status(200).json({ verified: true, credential: stored });
@@ -1085,7 +1124,16 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
 
   app.post(['/api/webauthn/authenticate-options', '/api/auth/webauthn/authenticate-options'], (req, res) => {
     const challenge = generateWebAuthnChallenge();
-    res.json({ challenge, timeout: 60000, rpId: req.hostname });
+    const credentialId = req.body?.credentialId;
+    const responsePayload: any = { challenge, timeout: 60000, rpId: req.hostname };
+    if (credentialId) {
+      responsePayload.allowCredentials = [{
+        id: credentialId,
+        type: 'public-key',
+        transports: ['usb', 'nfc', 'ble', 'internal', 'hybrid', 'smart-card']
+      }];
+    }
+    res.json(responsePayload);
   });
 
   // Hardened WebAuthn Assertion Verification (REM-03 / Task 1.2)
@@ -1104,13 +1152,15 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
         return;
       }
 
+      const requireUserVerification = req.body?.requireUserVerification === true || req.body?.userVerification === 'required';
       const result = verifyWebAuthnAssertion({
         credentialId: credentialId || assertion.id,
         clientDataJSONB64: assertion.response.clientDataJSON,
         authenticatorDataB64: assertion.response.authenticatorData,
         signatureB64: assertion.response.signature || '',
         expectedOrigin,
-        expectedRpId
+        expectedRpId,
+        requireUserVerification
       });
 
       if (!result.verified) {

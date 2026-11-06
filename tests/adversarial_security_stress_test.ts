@@ -46,7 +46,7 @@ async function runAdversarialTestSuite() {
   console.log('================================================================================\n');
 
   // Boot ephemeral Express server with createApp()
-  const app = createApp();
+  const app = createApp({ isTest: true });
   const server = createServer(app);
 
   await new Promise<void>((resolve) => {
@@ -230,17 +230,33 @@ async function runAdversarialTestSuite() {
     );
 
     // 2.3 Bit-flip attack on secondFactorHash
+    const instChallengeRes23 = await fetch(`${baseUrl}/api/institutional-challenge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
+    });
+    const instChallengeData23 = await instChallengeRes23.json();
+    const challengeStr23 = instChallengeData23.challenge;
+
+    const canonicalMessage23 = `${challengeStr23}:${authenticFp}`;
+    const userSignatureBuffer23 = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: { name: 'SHA-256' } },
+      userKeyPair.privateKey,
+      new TextEncoder().encode(canonicalMessage23)
+    );
+    const userSigB6423 = Buffer.from(userSignatureBuffer23).toString('base64url');
+
     const singleBitFlippedFp = authenticFp.slice(0, -1) + (authenticFp.endsWith('A') ? 'B' : 'A');
     const bitFlipRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         v: 1,
-        challengeId: challengeStr,
+        challengeId: challengeStr23,
         secondFactorHash: singleBitFlippedFp,
         userPublicKey: userPublicKeyJwk,
-        userSignature: userSigB64,
-        institutionalSignature: instChallengeData.signatureBase64
+        userSignature: userSigB6423,
+        institutionalSignature: instChallengeData23.signatureBase64
       })
     });
     const bitFlipData = await bitFlipRes.json();
@@ -250,7 +266,7 @@ async function runAdversarialTestSuite() {
       'Single-Character Alteration of secondFactorHash',
       'valid=false, reason="Signature verification failed"',
       `valid=${bitFlipData.valid}, reason="${bitFlipData.reason}"`,
-      bitFlipData.valid === false
+      bitFlipData.valid === false && bitFlipData.reason === 'Signature verification failed'
     );
 
     // 2.4 Missing / Null secondFactorHash
@@ -259,7 +275,7 @@ async function runAdversarialTestSuite() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         v: 1,
-        challengeId: challengeStr,
+        challengeId: 'dummy-challenge-id',
         secondFactorHash: '',
         userPublicKey: userPublicKeyJwk,
         userSignature: userSigB64
@@ -272,6 +288,50 @@ async function runAdversarialTestSuite() {
       'HTTP 400 Bad Request',
       `HTTP ${nullFpRes.status}`,
       nullFpRes.status === 400
+    );
+
+    // 2.5 Concurrent Parallel Assertion Replay Defense (ISS-06)
+    const instChallengeRes25 = await fetch(`${baseUrl}/api/institutional-challenge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
+    });
+    const instChallengeData25 = await instChallengeRes25.json();
+    const challengeStr25 = instChallengeData25.challenge;
+
+    const canonicalMessage25 = `${challengeStr25}:${authenticFp}`;
+    const userSignatureBuffer25 = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: { name: 'SHA-256' } },
+      userKeyPair.privateKey,
+      new TextEncoder().encode(canonicalMessage25)
+    );
+    const userSigB6425 = Buffer.from(userSignatureBuffer25).toString('base64url');
+
+    const concurrentPayload = {
+      v: 1,
+      challengeId: challengeStr25,
+      secondFactorHash: authenticFp,
+      userPublicKey: userPublicKeyJwk,
+      userSignature: userSigB6425,
+      institutionalSignature: instChallengeData25.signatureBase64
+    };
+
+    const concurrentResults = await Promise.all([
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+    ]);
+    const validCount = concurrentResults.filter(r => r.valid === true).length;
+    const replayCount = concurrentResults.filter(r => r.valid === false && r.reason?.includes('Replay detected')).length;
+    record(
+      'Vector 2',
+      'V2.5',
+      'Concurrent Parallel Assertion Replay Defense (5 simultaneous requests)',
+      'Exactly 1 valid, 4 replay rejected',
+      `valid=${validCount}/5, replayRejected=${replayCount}/5`,
+      validCount === 1 && replayCount === 4
     );
 
     // =========================================================================
@@ -551,15 +611,31 @@ async function runAdversarialTestSuite() {
     );
 
     // 4.8 Tampered Institutional Signature
+    const instFreshRes48 = await fetch(`${baseUrl}/api/institutional-challenge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
+    });
+    const instFreshData48 = await instFreshRes48.json();
+    const freshChallenge48 = instFreshData48.challenge;
+
+    const freshMsg48 = `${freshChallenge48}:${authenticFp}`;
+    const freshSig48 = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: { name: 'SHA-256' } },
+      userKeyPair.privateKey,
+      new TextEncoder().encode(freshMsg48)
+    );
+    const freshSigB6448 = Buffer.from(freshSig48).toString('base64url');
+
     const tamperedInstSigRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         v: 1,
-        challengeId: freshChallenge,
+        challengeId: freshChallenge48,
         secondFactorHash: authenticFp,
         userPublicKey: userPublicKeyJwk,
-        userSignature: freshSigB64,
+        userSignature: freshSigB6448,
         institutionalSignature: 'MEYCIQDaTamperedInstSignatureFakeBytes1234567890=='
       })
     });

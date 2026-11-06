@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { 
+  Shield,
   ShieldCheck, 
   Layers, 
   Terminal, 
@@ -20,18 +21,16 @@ import {
   Zap,
   ArrowLeftRight
 } from 'lucide-react';
-import { UserProfile, PortfolioItem, ThemeConfig, ScreeningTicket, DKProduct, DKWallet, ZKALogEntry, EidasAssertion, UhdRfidAssertion } from './types';
-import { DEFAULT_PROFILE, DEFAULT_THEME, DEFAULT_PORTFOLIO, DEFAULT_SCREENING_TICKETS, DEFAULT_DK_PRODUCTS, DEFAULT_DK_WALLETS, DEFAULT_ZKA_LOGS } from './data';
+import { UserProfile, DKProduct, DKWallet, EidasAssertion, UhdRfidAssertion } from './types';
+import { DEFAULT_PROFILE, DEFAULT_DK_PRODUCTS, DEFAULT_DK_WALLETS, DEFAULT_UHD_RFID_ASSERTIONS } from './data';
 
 import DocumentationMode from './components/DocumentationMode';
-import UnifiedLabDemo from './sandbox/UnifiedLabDemo';
 import SwissUnifiedPoCDemo from './sandbox/SwissUnifiedPoCDemo';
 
 import { BilanxStressTest } from './sandbox/BilanxStressTest';
 import { useGoogleAuth, VerifiedGoogleUser } from './hooks/useGoogleAuth';
 import { GoogleAuthGate } from './components/GoogleAuthGate';
 import { AccessLogAuditModal } from './components/AccessLogAuditModal';
-import EidasNodeLab from './components/EidasNodeLab';
 
 export default function App() {
   const { 
@@ -170,84 +169,7 @@ function BilanxApp({
         if (parsed && parsed.length > 0) return parsed;
       } catch (_) {}
     }
-    return [
-      {
-        id: "RFID-SAML-2026-06-23-01",
-        timestamp: "2026-06-23T10:15:30.000Z",
-        hardwareUid: "UID-9904-AUTH-951",
-        productName: "Audentes Mint Tobacco Pods (Pack of 4)",
-        category: "Tobacco",
-        status: "authentic",
-        hmacSha256: "bf89d7fa13cde6a54101bc89a742cd90981b2fcd1054a896d74b96791a82bc1b",
-        tagsRead: 12,
-        rssi: -32,
-        collisions: 1,
-        issuer: "http://consortium-rfid-svs.int",
-        exciseRecovered: 3.85,
-        signature: "SIG-ECDSA-AUDNT-9904A"
-      },
-      {
-        id: "RFID-SAML-2026-06-23-02",
-        timestamp: "2026-06-23T11:42:15.000Z",
-        hardwareUid: "UID-8812-AUTH-324",
-        productName: "Veritas Premium Aged Cognac v2",
-        category: "Alcohol",
-        status: "authentic",
-        hmacSha256: "2d3e5f4c8b9a1e0f6d8c7b9a5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d",
-        tagsRead: 8,
-        rssi: -28,
-        collisions: 0,
-        issuer: "http://consortium-rfid-svs.int",
-        exciseRecovered: 3.85,
-        signature: "SIG-ECDSA-VERT-8812C"
-      },
-      {
-        id: "RFID-SAML-2026-06-23-03",
-        timestamp: "2026-06-23T13:05:00.000Z",
-        hardwareUid: "UID-1102-FAKE-881",
-        productName: "Lumina Grapefruit Ice Disposable (Counterfeit Serial)",
-        category: "Vaporizer",
-        status: "counterfeit",
-        hmacSha256: "8812739fa8e20cf3a209bc923dd8842bc01a9dfca891efcf004297bcda084e12",
-        tagsRead: 24,
-        rssi: -48,
-        collisions: 5,
-        issuer: "http://consortium-rfid-svs.int",
-        exciseRecovered: 0,
-        signature: "SIG-UNKNOWN-OR-REVOKED"
-      },
-      {
-        id: "RFID-SAML-2026-06-23-04",
-        timestamp: "2026-06-23T15:20:10.000Z",
-        hardwareUid: "UID-3221-RECALLED-60",
-        productName: "Chronos CBD Isolate Vaporizer Pen",
-        category: "Cannabinoids",
-        status: "recalled",
-        hmacSha256: "fe382a938c01d9f0a2cf8b92d04a7c8b201a9bfe8902c3d049f7e8a9bc01a2f4",
-        tagsRead: 15,
-        rssi: -35,
-        collisions: 2,
-        issuer: "http://consortium-rfid-svs.int",
-        exciseRecovered: 0,
-        signature: "SIG-ECDSA-CHRONOS-3221A"
-      }
-    ];
-  });
-
-  const [portfolio, setPortfolio] = useState<PortfolioItem[]>(() => {
-    const saved = localStorage.getItem('credentials_hub_portfolio');
-    if (saved) {
-      try { return JSON.parse(saved); } catch (_) {}
-    }
-    return DEFAULT_PORTFOLIO;
-  });
-
-  const [tickets, setTickets] = useState<ScreeningTicket[]>(() => {
-    const saved = localStorage.getItem('credentials_hub_tickets');
-    if (saved) {
-      try { return JSON.parse(saved); } catch (_) {}
-    }
-    return DEFAULT_SCREENING_TICKETS;
+    return DEFAULT_UHD_RFID_ASSERTIONS;
   });
 
   // Dual-Key Sovereign Validation System (DK-SVS) states
@@ -267,25 +189,14 @@ function BilanxApp({
     return DEFAULT_DK_WALLETS;
   });
 
-  const [zkaLogs, setZkaLogs] = useState<ZKALogEntry[]>(() => {
-    const saved = localStorage.getItem('credentials_hub_zka_logs');
-    if (saved) {
-      try { return JSON.parse(saved); } catch (_) {}
-    }
-    return DEFAULT_ZKA_LOGS;
-  });
-
   // Real-time Accumulated Compliance Rebate daily ledger carrot
   const [accumulatedRebate, setAccumulatedRebate] = useState<number>(() => {
     const saved = localStorage.getItem('credentials_hub_accumulated_rebate');
     return saved ? parseFloat(saved) : 84.50; // default realistic baseline
   });
 
-  // Current Theme parameters. Defaults to "Vibrant Palette" aesthetic (slate dark base, cyan + indigo highlights)
-  const [theme, setTheme] = useState<ThemeConfig>(DEFAULT_THEME);
-  
-  // Navigation active Mode: 'swiss_demo' | 'showcase' | 'documentation' | 'stresstest' | 'eidas_node'
-  const [activeMode, setActiveMode] = useState<'swiss_demo' | 'showcase' | 'documentation' | 'stresstest' | 'eidas_node'>('swiss_demo');
+  // Navigation active Mode: 'swiss_demo' | 'showcase' | 'documentation'
+  const [activeMode, setActiveMode] = useState<'swiss_demo' | 'showcase' | 'documentation'>('swiss_demo');
 
   // Simple Security clearance level bypass (to demonstrate high-tech security credentials)
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
@@ -306,14 +217,6 @@ function BilanxApp({
   }, [uhdRfidAssertions]);
 
   useEffect(() => {
-    localStorage.setItem('credentials_hub_portfolio', JSON.stringify(portfolio));
-  }, [portfolio]);
-
-  useEffect(() => {
-    localStorage.setItem('credentials_hub_tickets', JSON.stringify(tickets));
-  }, [tickets]);
-
-  useEffect(() => {
     localStorage.setItem('credentials_hub_dk_products', JSON.stringify(dkProducts));
   }, [dkProducts]);
 
@@ -322,42 +225,8 @@ function BilanxApp({
   }, [dkWallets]);
 
   useEffect(() => {
-    localStorage.setItem('credentials_hub_zka_logs', JSON.stringify(zkaLogs));
-  }, [zkaLogs]);
-
-  useEffect(() => {
     localStorage.setItem('credentials_hub_accumulated_rebate', accumulatedRebate.toString());
   }, [accumulatedRebate]);
-
-  // Profile Save handler
-  const handleUpdateProfile = (newProfile: UserProfile) => {
-    setProfile(newProfile);
-  };
-
-  // Portfolio items update handler
-  const handleUpdatePortfolio = (newPortfolio: PortfolioItem[]) => {
-    setPortfolio(newPortfolio);
-  };
-
-  // Add individual portfolio item
-  const handleAddPortfolioItem = (newItem: PortfolioItem) => {
-    setPortfolio(prev => [newItem, ...prev]);
-  };
-
-  // Updates specific screening ticket evaluations when the manual officer audits them
-  const handleUpdateTicketStatus = (id: string, status: 'passed' | 'failed' | 'requires_manual_audit', notes?: string) => {
-    setTickets(prev => prev.map(ticket => {
-      if (ticket.id === id) {
-        return { 
-          ...ticket, 
-          status, 
-          evaluationNotes: notes,
-          scannedResultScore: status === 'passed' ? 99.8 : (status === 'failed' ? 15.0 : 61.2) // update compliance rates dynamically
-        };
-      }
-      return ticket;
-    }));
-  };
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans overflow-x-hidden selection:bg-[#0B3B60] selection:text-white">
@@ -389,32 +258,11 @@ function BilanxApp({
                 : 'hover:text-slate-800'
             }`}
           >
-            <span>🇨🇭</span> Swiss Sovereign E2E Demo
+            <Shield size={14} /> Unified Sandbox
+
           </button>
 
-          <button 
-            id="nav-eidas-node"
-            onClick={() => setActiveMode('eidas_node')}
-            className={`cursor-pointer transition-all pb-1.5 flex items-center gap-1.5 whitespace-nowrap ${
-              activeMode === 'eidas_node' 
-                ? 'text-blue-600 border-b-2 border-blue-600 font-black' 
-                : 'hover:text-slate-800'
-            }`}
-          >
-            <ShieldCheck size={14} /> eIDAS 2.0 SAML Lab
-          </button>
 
-          <button 
-            id="nav-stresstest"
-            onClick={() => setActiveMode('stresstest')}
-            className={`cursor-pointer transition-all pb-1.5 flex items-center gap-1.5 whitespace-nowrap ${
-              activeMode === 'stresstest' 
-                ? 'text-blue-600 border-b-2 border-blue-600 font-black' 
-                : 'hover:text-slate-800'
-            }`}
-          >
-            <Terminal size={14} /> Lab Demo (Real Path)
-          </button>
 
           <button 
             id="nav-showcase"
@@ -425,7 +273,8 @@ function BilanxApp({
                 : 'hover:text-slate-800'
             }`}
           >
-            <Zap size={14} /> Advanced / Dossier
+            <FileText size={14} /> Technical Dossier
+
           </button>
           
           
@@ -442,36 +291,8 @@ function BilanxApp({
           </button>
         </nav>
 
-        {/* Quick Switch Button Group: [Lab Demo] <-> [Advanced] */}
         <div className="flex items-center gap-3">
-          <div className="flex items-center bg-slate-100 p-1 rounded-lg border border-slate-200 shadow-xs" title="Switch dashboard mode">
-            <button
-              id="btn-quick-switch-stress"
-              onClick={() => setActiveMode('stresstest')}
-              className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                activeMode === 'stresstest'
-                  ? 'bg-blue-600 text-white shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/70'
-              }`}
-            >
-              <Terminal size={13} />
-              <span>Lab Demo</span>
-            </button>
-            <button
-              id="btn-quick-switch-pos"
-              onClick={() => setActiveMode('showcase')}
-              className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                activeMode === 'showcase'
-                  ? 'bg-[#0B3B60] text-white shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/70'
-              }`}
-            >
-              <Zap size={13} />
-              <span>Advanced</span>
-            </button>
-          </div>
 
-          {/* Verification Badging */}
           <div className="text-right hidden xl:block">
             <span className="text-[9px] font-bold text-slate-400 block uppercase leading-none">Assigned Store</span>
             <span className="text-xs font-extrabold text-slate-700">{profile.company}</span>
@@ -565,23 +386,20 @@ function BilanxApp({
       {/* 🏛️ MAIN INSTITUTIONAL WORKSPACE */}
       <main className="flex-1 px-4 md:px-10 py-8 max-w-7xl mx-auto w-full">
         {activeMode === 'swiss_demo' && (
-          <SwissUnifiedPoCDemo currentUser={user} />
-        )}
-
-        {activeMode === 'eidas_node' && (
-          <EidasNodeLab />
-        )}
-
-        {activeMode === 'stresstest' && (
-          <UnifiedLabDemo 
+          <SwissUnifiedPoCDemo 
+            currentUser={user}
+            initialTab="pilot"
+            boundAssertions={eidasAssertions}
+            boundRfidAssertions={uhdRfidAssertions}
+            onAddAssertion={(newAssertion) => setEidasAssertions(prev => [newAssertion, ...prev])}
             dkProducts={dkProducts}
             dkWallets={dkWallets}
-            onRebate={(delta) => setAccumulatedRebate(prev => prev + delta)}
           />
         )}
 
+
         {activeMode === 'showcase' && (
-          <BilanxStressTest onSwitchToRetailPos={() => setActiveMode('stresstest')} />
+          <BilanxStressTest onSwitchToRetailPos={() => setActiveMode('swiss_demo')} />
         )}
 
 

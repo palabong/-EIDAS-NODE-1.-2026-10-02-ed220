@@ -21,100 +21,10 @@ import crypto from 'crypto';
 import type { AddressInfo } from 'net';
 import assert from 'assert';
 import {
-  generateWebAuthnChallenge,
-  registerWebAuthnCredential,
-  verifyWebAuthnAssertion,
   clearWebAuthnState,
   encodeCbor
 } from '../src/server/webauthnServer.ts';
-
-function buildTestApp(): express.Express {
-  const app = express();
-  app.use(express.json());
-
-  app.post('/api/webauthn/register-options', (req, res) => {
-    const username = req.body?.username || 'daniele.palagi92@gmail.com';
-    const displayName = req.body?.displayName || 'Daniele Palagi';
-    const challenge = generateWebAuthnChallenge();
-    const rpId = req.hostname;
-
-    res.json({
-      challenge,
-      rp: { name: 'Project Bilanx Sovereign Node', id: rpId },
-      user: { id: Buffer.from(username).toString('base64url'), name: username, displayName },
-      pubKeyCredParams: [
-        { alg: -7, type: 'public-key' },  // ES256 (ECDSA P-256)
-        { alg: -257, type: 'public-key' } // RS256 (RSA SHA-256)
-      ],
-      authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'preferred' }
-    });
-  });
-
-  app.post('/api/webauthn/register-verify', (req, res) => {
-    try {
-      const { credential, username } = req.body || {};
-      if (!credential || !credential.id || !credential.response) {
-        res.status(400).json({ verified: false, error: 'Missing credential payload or response' });
-        return;
-      }
-      const expectedRpId = req.hostname;
-      const expectedOrigin = req.headers.origin || `${req.protocol}://${req.get('host')}`;
-
-      const stored = registerWebAuthnCredential({
-        credentialId: credential.id,
-        username: username || 'daniele.palagi92@gmail.com',
-        clientDataJSONB64: credential.response.clientDataJSON,
-        attestationObjectB64: credential.response.attestationObject,
-        authenticatorDataB64: credential.response.authenticatorData,
-        publicKeyPem: credential.response.publicKey,
-        authenticatorAttachment: credential.authenticatorAttachment || 'platform',
-        expectedOrigin,
-        expectedRpId
-      });
-
-      res.status(200).json({ verified: true, credential: stored });
-    } catch (err: any) {
-      res.status(400).json({ verified: false, error: err.message });
-    }
-  });
-
-  app.post('/api/webauthn/authenticate-options', (req, res) => {
-    const challenge = generateWebAuthnChallenge();
-    res.json({ challenge, timeout: 60000, rpId: req.hostname });
-  });
-
-  app.post('/api/webauthn/authenticate-verify', (req, res) => {
-    try {
-      const { assertion, credentialId } = req.body || {};
-      if (!assertion || !assertion.response) {
-        res.status(400).json({ verified: false, error: 'Missing assertion response' });
-        return;
-      }
-      const expectedRpId = req.hostname;
-      const expectedOrigin = req.headers.origin || `${req.protocol}://${req.get('host')}`;
-
-      const result = verifyWebAuthnAssertion({
-        credentialId: credentialId || assertion.id,
-        clientDataJSONB64: assertion.response.clientDataJSON,
-        authenticatorDataB64: assertion.response.authenticatorData,
-        signatureB64: assertion.response.signature || '',
-        expectedOrigin,
-        expectedRpId
-      });
-
-      if (!result.verified) {
-        res.status(400).json(result);
-        return;
-      }
-
-      res.status(200).json(result);
-    } catch (err: any) {
-      res.status(400).json({ verified: false, error: err.message });
-    }
-  });
-
-  return app;
-}
+import { createApp } from '../src/server/app.ts';
 
 function createMockAuthenticatorKeys() {
   const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
@@ -201,7 +111,7 @@ async function runWebAuthnTests() {
   console.log('[WebAuthn Test Suite] Booting ephemeral Express server...');
   clearWebAuthnState();
 
-  const app = buildTestApp();
+  const app = createApp({ isTest: true });
   const server = createServer(app);
   let passed = 0;
   let failed = 0;

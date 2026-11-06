@@ -1,0 +1,63 @@
+<svg width="850" height="550" version="1.1" viewBox="0 0 850 550" xmlns:xlink="" xmlns="">
+<rect width="850" height="550" x="0" y="0" fill="#0f172a"></rect>
+<path d="M85 467.5L765 467.5" fill="transparent" stroke="#1e293b" stroke-dasharray="4,2" class="zr0-cls-0"></path>
+<path d="M85 396.5L765 396.5" fill="transparent" stroke="#1e293b" stroke-dasharray="4,2" class="zr0-cls-0"></path>
+<path d="M85 324.5L765 324.5" fill="transparent" stroke="#1e293b" stroke-dasharray="4,2" class="zr0-cls-0"></path>
+<path d="M85 253.5L765 253.5" fill="transparent" stroke="#1e293b" stroke-dasharray="4,2" class="zr0-cls-0"></path>
+<path d="M85 181.5L765 181.5" fill="transparent" stroke="#1e293b" stroke-dasharray="4,2" class="zr0-cls-0"></path>
+<path d="M85 110.5L765 110.5" fill="transparent" stroke="#1e293b" stroke-dasharray="4,2" class="zr0-cls-0"></path>
+<text text-anchor="middle" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" y="-6" transform="translate(85 95)" fill="#94a3b8">Payload / PII Size (Bytes)</text>
+<text text-anchor="middle" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" y="-6" transform="translate(765 95)" fill="#10b981">Verification Latency (ms)</text>
+<path d="M85 467.5L765 467.5" fill="transparent" stroke="#475569" stroke-linecap="round" class="zr0-cls-0"></path>
+<path d="M85.5 467.5L85.5 472.5" fill="transparent" stroke="#475569" class="zr0-cls-0"></path>
+<path d="M538.5 467.5L538.5 472.5" fill="transparent" stroke="#475569" class="zr0-cls-0"></path>
+<path d="M765.5 467.5L765.5 472.5" fill="transparent" stroke="#475569" class="zr0-cls-0"></path>
+<text text-anchor="end" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" transform="translate(77 467.5)" fill="#cbd5e1">0 B</text>
+<text text-anchor="end" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" transform="translate(77 396)" fill="#cbd5e1">1,000 B</text>
+<text text-anchor="end" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" transform="translate(77 324.5)" fill="#cbd5e1">2,000 B</text>
+<text text-anchor="end" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" transform="translate(77 253)" fill="#cbd5e1">3,000 B</text>
+<text text-anchor="end" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" transform="translate(77 181.5)" fill="#cbd5e1">4,000 B</text>
+<text text-anchor="end" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" transform="translate(77 110)" fill="#cbd5e1">5,000 B</text>
+<text text-anchor="start" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" transform="translate(773 467.5)" fill="#10b981">0 ms</text>
+<text text-anchor="start" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" transform="translate(773 416.4286)" fill="#10b981">2 ms</text>
+<text text-anchor="start" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" transform="translate(773 365.3571)" fill="#10b981">4 ms</text>
+<text text-anchor="start" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" transform="translate(773 314.2857)" fill="#10b981">6 ms</text>
+<text text-anchor="start" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" transform="translate(773 263.2143)" fill="#10b981">8 ms</text>
+<text text-anchor="start" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" transform="translate(773 212.1429)" fill="#10b981">10 ms</text>
+<text text-anchor="start" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" transform="translate(773 161.0714)" fill="#10b981">12 ms</text>
+<text text-anchor="start" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" transform="translate(773 110)" fill="#10b981">14 ms</text>
+<text text-anchor="middle" style="font-size:13px;font-family:sans-serif;font-weight:bold;" xml:space="preserve" y="6.5" transform="translate(198.3333 475.5)" fill="#cbd5e1">Bilanx B2 ZKP (Sovereign Node)</text>
+<text text-anchor="middle" style="font-size:13px;font-family:sans-serif;font-weight:bold;" xml:space="preserve" y="6.5" transform="translate(651.6667 475.5)" fill="#cbd5e1">Standard eIDAS SAML 2.0</text>
+<path d="M121.6 370.6L184.8 370.6A6 6 0 0 1 190.8 376.6L190.8 467.5L115.6 467.5L115.6 376.6A6 6 0 0 1 121.6 370.6" fill="#3b82f6" class="zr0-cls-1"></path>
+<path d="M348.3 238.7L411.5 238.7A6 6 0 0 1 417.5 244.7L417.5 467.5L342.3 467.5L342.3 244.7A6 6 0 0 1 348.3 238.7" fill="#3b82f6" class="zr0-cls-1"></path>
+<path d="M574.9 122.9L638.1 122.9A6 6 0 0 1 644.1 128.9L644.1 467.5L568.9 467.5L568.9 128.9A6 6 0 0 1 574.9 122.9" fill="#3b82f6" class="zr0-cls-1"></path>
+<path d="M205.9 467.5L281.1 467.5L205.9 467.5" fill="#ef4444" class="zr0-cls-2"></path>
+<path d="M438.5 366L501.7 366A6 6 0 0 1 507.7 372L507.7 467.5L432.5 467.5L432.5 372A6 6 0 0 1 438.5 366" fill="#ef4444" class="zr0-cls-2"></path>
+<path d="M665.2 264.4L728.4 264.4A6 6 0 0 1 734.4 270.4L734.4 467.5L659.2 467.5L659.2 270.4A6 6 0 0 1 665.2 264.4" fill="#ef4444" class="zr0-cls-2"></path>
+<g clip-path="url(#zr0-c0)">
+<path d="M198.3 352.6L425 258.1L651.7 150.9" fill="transparent" stroke="#10b981" stroke-width="3" stroke-linejoin="bevel" class="zr0-cls-4"></path>
+</g>
+<path d="M1 0A1 1 0 1 1 1 -0.1A1 1 0 0 1 1 0" transform="matrix(5,0,0,5,198.3333,352.5893)" fill="#10b981" class="zr0-cls-5"></path>
+<path d="M1 0A1 1 0 1 1 1 -0.1A1 1 0 0 1 1 0" transform="matrix(5,0,0,5,425,258.1071)" fill="#10b981" class="zr0-cls-5"></path>
+<path d="M1 0A1 1 0 1 1 1 -0.1A1 1 0 0 1 1 0" transform="matrix(5,0,0,5,651.6667,150.8571)" fill="#10b981" class="zr0-cls-5"></path>
+<path d="M-5 -5l565.6 0l0 24l-565.6 0Z" transform="translate(147.2 60)" fill="rgb(0,0,0)" fill-opacity="0" stroke="#ccc" stroke-width="0" class="zr0-cls-0"></path>
+<path d="M3.5 0L21.5 0A3.5 3.5 0 0 1 25 3.5L25 10.5A3.5 3.5 0 0 1 21.5 14L3.5 14A3.5 3.5 0 0 1 0 10.5L0 3.5A3.5 3.5 0 0 1 3.5 0" transform="translate(147.2 60)" fill="#3b82f6" class="zr0-cls-0"></path>
+<text text-anchor="start" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" x="30" y="7" transform="translate(147.2 60)" fill="#cbd5e1">Wire Payload Size (Bytes)</text>
+<path d="M0 0l169.7 0l0 14l-169.7 0Z" transform="translate(147.2 60)" fill="transparent" class="zr0-cls-6"></path>
+<path d="M3.5 0L21.5 0A3.5 3.5 0 0 1 25 3.5L25 10.5A3.5 3.5 0 0 1 21.5 14L3.5 14A3.5 3.5 0 0 1 0 10.5L0 3.5A3.5 3.5 0 0 1 3.5 0" transform="translate(326.88 60)" fill="#ef4444" class="zr0-cls-0"></path>
+<text text-anchor="start" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" x="30" y="7" transform="translate(326.88 60)" fill="#cbd5e1">Plaintext PII Transmitted (Bytes)</text>
+<path d="M0 0l202.6 0l0 14l-202.6 0Z" transform="translate(326.88 60)" fill="transparent" class="zr0-cls-6"></path>
+<path d="M0 7L25 7" transform="translate(540.44 60)" fill="#000" stroke="#10b981" stroke-width="2" stroke-linecap="butt" stroke-miterlimit="10" class="zr0-cls-0"></path>
+<path d="M18.1 7A5.6 5.6 0 1 1 18.1 6.4A5.6 5.6 0 0 1 18.1 7" transform="translate(540.44 60)" fill="#10b981" class="zr0-cls-0"></path>
+<text text-anchor="start" style="font-size:12px;font-family:sans-serif;" xml:space="preserve" x="30" y="7" transform="translate(540.44 60)" fill="#cbd5e1">Verification Latency (ms)</text>
+<path d="M-1 1l163.4 0l0 12l-163.4 0Z" transform="translate(540.44 60)" fill="transparent" class="zr0-cls-6"></path>
+<path d="M-278.6 -5l557.2 0l0 51l-557.2 0Z" transform="translate(425 16)" fill="rgb(0,0,0)" fill-opacity="0" stroke="#ccc" stroke-width="0" class="zr0-cls-0"></path>
+<text text-anchor="middle" style="font-size:18px;font-family:sans-serif;font-weight:bold;" xml:space="preserve" y="9" transform="translate(425 16)" fill="#f8fafc">Project Bilanx: Protocol Overhead &amp; Verification Latency Benchmark</text>
+<text text-anchor="middle" style="font-size:13px;font-family:sans-serif;" xml:space="preserve" y="34.5" transform="translate(425 16)" fill="#94a3b8">Empirical comparison: Project Bilanx 1,355B ZKP vs. W3C VC vs. Full SAML 2.0</text>
+<defs>
+<clipPath id="zr0-c0">
+<path d="M83 108.5l684 0l0 360.5l-684 0Z" fill="#000" class="zr0-cls-3"></path>
+</clipPath>
+</defs>
+
+</svg>

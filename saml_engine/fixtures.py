@@ -427,4 +427,35 @@ def get_minor_luca_response(**kwargs) -> str:
         **kwargs
     )
 
+def get_italian_adult_response(**kwargs) -> str:
+    return build_signed_saml_response(
+        given_name="Marco",
+        family_name="Rossi",
+        date_of_birth="1991-03-24",
+        person_identifier="ITA-RM-339102-MR",
+        loa="http://eidas.europa.eu/LoA/high",
+        **kwargs
+    )
+
+def get_italian_adult_substantial_response(**kwargs) -> str:
+    return build_signed_saml_response(
+        given_name="Giulia",
+        family_name="Bianchi",
+        date_of_birth="1998-07-19",
+        person_identifier="ITA-MI-772910-GB",
+        loa="http://eidas.europa.eu/LoA/substantial",
+        **kwargs
+    )
+
+def get_italian_minor_response(**kwargs) -> str:
+    return build_signed_saml_response(
+        given_name="Matteo",
+        family_name="Russo",
+        date_of_birth="2010-09-05",
+        person_identifier="ITA-NA-551029-MR",
+        loa="http://eidas.europa.eu/LoA/high",
+        **kwargs
+    )
+
+
 

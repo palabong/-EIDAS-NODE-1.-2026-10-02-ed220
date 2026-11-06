@@ -3,7 +3,7 @@
  * Supports CLI subprocess execution, HTTP microservice forwarding, and native cryptographic verification.
  */
 
-import { spawn, execSync } from 'child_process';
+import { spawn } from 'child_process';
 import crypto from 'crypto';
 import type { SAMLValidationResponse, LoALevel } from './types/saml.ts';
 
@@ -211,6 +211,29 @@ export async function validateSAMLResponse(
   rawPayload: string,
   expectedAudience?: string
 ): Promise<SAMLValidationResponse> {
+  if (!rawPayload || typeof rawPayload !== 'string' || !rawPayload.trim()) {
+    return {
+      is_valid: false,
+      error_message: "Missing or empty SAML response payload.",
+    };
+  }
+
+  // Security check: null-byte injection defense
+  if (rawPayload.includes('\0')) {
+    return {
+      is_valid: false,
+      error_message: "Security Violation: Null bytes detected in SAML payload.",
+    };
+  }
+
+  // Security check: maximum payload size (2MB) defense against memory exhaustion
+  if (Buffer.byteLength(rawPayload, 'utf-8') > 2 * 1024 * 1024) {
+    return {
+      is_valid: false,
+      error_message: "Security Violation: SAML payload exceeds maximum allowed size (2MB).",
+    };
+  }
+
   let xmlString = rawPayload.trim();
 
   // Decode Base64 if needed
@@ -225,6 +248,20 @@ export async function validateSAMLResponse(
     }
   }
 
+  if (xmlString.includes('\0')) {
+    return {
+      is_valid: false,
+      error_message: "Security Violation: Null bytes detected in SAML payload.",
+    };
+  }
+
+  if (!xmlString.startsWith('<') && !xmlString.includes('<')) {
+    return {
+      is_valid: false,
+      error_message: "Invalid SAML payload: Not a valid XML document.",
+    };
+  }
+
   // Pre-check for DTD/XXE
   if (/<!\s*(DOCTYPE|ENTITY)/i.test(xmlString)) {
     return {
@@ -237,10 +274,20 @@ export async function validateSAMLResponse(
   return await validateSAMLWithPythonCLI(xmlString, expectedAudience);
 }
 
+// In-memory cache for generated fixtures to prevent process spawning storms
+const fixtureCache = new Map<string, { xml: string; expiresAt: number }>();
+
 /**
-  * Retrieves test fixture SAML Response XML string by preset name
+  * Asynchronously retrieves test fixture SAML Response XML string by preset name.
+  * Non-blocking, with short-lived cache (60s) to keep timestamps fresh while avoiding event-loop starvation.
   */
-export function getPresetFixtureXml(presetKey: string): string {
+export async function getPresetFixtureXml(presetKey: string): Promise<string> {
+  const now = Date.now();
+  const cached = fixtureCache.get(presetKey);
+  if (cached && now < cached.expiresAt) {
+    return cached.xml;
+  }
+
   let funcName = 'get_valid_rsa_response()';
   switch (presetKey) {
     case 'valid_rsa':
@@ -270,16 +317,45 @@ export function getPresetFixtureXml(presetKey: string): string {
     case 'luca_rossi':
       funcName = 'get_minor_luca_response()';
       break;
+    case 'it_adult_high':
+    case 'marco_rossi':
+      funcName = 'get_italian_adult_response()';
+      break;
+    case 'it_adult_substantial':
+    case 'giulia_bianchi':
+      funcName = 'get_italian_adult_substantial_response()';
+      break;
+    case 'it_minor_matteo':
+    case 'matteo_russo':
+      funcName = 'get_italian_minor_response()';
+      break;
     default:
       funcName = 'get_valid_rsa_response()';
   }
-  try {
-    const res = execSync(`python3 -c "from saml_engine.fixtures import *; print(${funcName})"`, {
+
+  return new Promise<string>((resolve) => {
+    const py = spawn('python3', ['-c', `from saml_engine.fixtures import *; print(${funcName})`], {
       cwd: process.cwd(),
-      encoding: 'utf-8',
+      env: process.env,
     });
-    return res.trim();
-  } catch {
-    return '';
-  }
+
+    let stdoutData = '';
+    py.stdout.on('data', (chunk) => {
+      stdoutData += chunk.toString();
+    });
+
+    py.on('close', (code) => {
+      const trimmed = stdoutData.trim();
+      if (code === 0 && trimmed) {
+        fixtureCache.set(presetKey, { xml: trimmed, expiresAt: now + 60_000 });
+        resolve(trimmed);
+      } else {
+        resolve('');
+      }
+    });
+
+    py.on('error', () => {
+      resolve('');
+    });
+  });
 }

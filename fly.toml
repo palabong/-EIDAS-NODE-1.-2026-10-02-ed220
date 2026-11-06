@@ -11,6 +11,8 @@ primary_region = 'fra'
 [env]
   NODE_ENV = 'production'
   PORT = '3000'
+  GOOGLE_CLIENT_ID = 'your_client_id.apps.googleusercontent.com'
+  APP_ORIGIN = 'https://eidas-node-1-2026-10-02-ed220-black-water-1048.fly.dev'
 
 [http_service]
   internal_port = 3000

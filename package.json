@@ -1,7 +1,8 @@
 {
-  "name": "react-example",
+  "name": "project-bilanx-eidas-node",
+  "description": "Project Bilanx Sovereign eIDAS 2.0 Node & Dual-Key Validation System",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
@@ -10,8 +11,9 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "test": "npm run test:all",
-    "test:all": "python3 -m unittest saml_engine/test_engine.py && npx tsx tests/saml_e2e_server_test.ts && npx tsx tests/b2_acceptance_harness.ts && npx tsx tests/e2e_dualkey_agegate_harness.ts && npx tsx tests/webauthn_e2e_test.ts && npx tsx tests/swiss_unified_e2e_test.ts && npx tsx tests/adversarial_security_stress_test.ts",
+    "test:all": "python3 -m unittest saml_engine/test_engine.py && npx tsx tests/saml_e2e_server_test.ts && npx tsx tests/b2_acceptance_harness.ts && npx tsx tests/e2e_dualkey_agegate_harness.ts && npx tsx tests/webauthn_e2e_test.ts && npx tsx tests/swiss_unified_e2e_test.ts && npx tsx tests/adversarial_security_stress_test.ts && npx tsx tests/pilot_sandbox_e2e_test.ts",
     "test:swiss": "npx tsx tests/swiss_unified_e2e_test.ts",
+    "test:pilot": "npx tsx tests/pilot_sandbox_e2e_test.ts",
     "test:saml": "python3 -m unittest saml_engine/test_engine.py && npx tsx tests/saml_e2e_server_test.ts",
     "test:zkp": "npx tsx tests/b2_acceptance_harness.ts",
     "test:dualkey": "npx tsx tests/e2e_dualkey_agegate_harness.ts",

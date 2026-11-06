@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
+import { GoogleAuth } from 'google-auth-library';
 
 export interface AccessLog {
   id: string;
@@ -114,6 +115,74 @@ async function persistLogs(): Promise<void> {
   }
 }
 
+let writeDebounceTimer: NodeJS.Timeout | null = null;
+
+function schedulePersistLogs() {
+  if (writeDebounceTimer) {
+    return;
+  }
+  writeDebounceTimer = setTimeout(() => {
+    writeDebounceTimer = null;
+    persistLogs().catch(err => console.error("[AccessLogDb] Persist error:", err));
+  }, 50);
+}
+
+const GCP_PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCP_PROJECT || 'your-gcp-project-id';
+const FIRESTORE_DATABASE_ID = process.env.FIRESTORE_DATABASE_ID || '(default)';
+let gcpAuthClient: GoogleAuth | null = null;
+
+async function persistToFirestore(log: AccessLog): Promise<void> {
+  // Only attempt Firestore persistence if in cloud environment or explicitly enabled
+  if (!process.env.K_SERVICE && !process.env.FIRESTORE_DATABASE_ID && process.env.USE_FIRESTORE !== 'true') {
+    return;
+  }
+
+  try {
+    if (!gcpAuthClient) {
+      gcpAuthClient = new GoogleAuth({
+        scopes: ['https://www.googleapis.com/auth/datastore']
+      });
+    }
+
+    const client = await gcpAuthClient.getClient();
+    const tokenResponse = await client.getAccessToken();
+    const token = tokenResponse.token;
+    if (!token) return;
+
+    // Convert fields to Firestore REST API document format
+    const fields: Record<string, any> = {
+      id: { stringValue: log.id },
+      timestamp: { timestampValue: log.timestamp },
+      userId: { stringValue: log.userId },
+      email: { stringValue: log.email },
+      name: { stringValue: log.name },
+      authMethod: { stringValue: log.authMethod },
+      action: { stringValue: log.action },
+      ipAddress: { stringValue: log.ipAddress },
+      userAgent: { stringValue: log.userAgent || '' },
+      status: { stringValue: log.status }
+    };
+
+    if (log.metadata) {
+      fields.metadata = { stringValue: JSON.stringify(log.metadata) };
+    }
+
+    const url = `https://firestore.googleapis.com/v1/projects/${GCP_PROJECT_ID}/databases/${FIRESTORE_DATABASE_ID}/documents/access_logs?documentId=${log.id}`;
+
+    await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ fields })
+    });
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.warn(`[AccessLogDb] Cloud Firestore async persist skipped: ${errMsg}`);
+  }
+}
+
 export async function recordAccessLog(
   entry: Omit<AccessLog, 'id' | 'timestamp'>
 ): Promise<AccessLog> {
@@ -133,8 +202,30 @@ export async function recordAccessLog(
     memoryLogs = memoryLogs.slice(0, 10000);
   }
 
-  // Asynchronously save to persistent JSON database
-  persistLogs().catch(err => console.error("[AccessLogDb] Async persist error:", err));
+  // 1. Asynchronously save to persistent local JSON database (batched via debounce)
+  schedulePersistLogs();
+
+  // 2. Asynchronously save to Google Cloud Firestore (in Cloud Run / Production)
+  persistToFirestore(newLog).catch(() => {});
+
+  // 3. Emit structured audit log to stdout for Google Cloud Logging ingestion
+  if (process.env.NODE_ENV === 'production' || process.env.K_SERVICE) {
+    console.log(JSON.stringify({
+      severity: newLog.status === 'DENIED' ? 'WARNING' : 'INFO',
+      message: `[AccessLog] ${newLog.action} (${newLog.authMethod}) - User: ${newLog.email || newLog.userId} - Status: ${newLog.status}`,
+      eidasAudit: {
+        id: newLog.id,
+        timestamp: newLog.timestamp,
+        userId: newLog.userId,
+        email: newLog.email,
+        authMethod: newLog.authMethod,
+        action: newLog.action,
+        status: newLog.status,
+        ipAddress: newLog.ipAddress,
+        metadata: newLog.metadata
+      }
+    }));
+  }
 
   return newLog;
 }

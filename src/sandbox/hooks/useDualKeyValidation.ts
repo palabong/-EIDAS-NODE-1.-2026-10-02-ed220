@@ -38,7 +38,7 @@ export function useDualKeyValidation(
   // Always call both hooks to comply with React Rules of Hooks.
   // This is safe and preferred over conditional hook calls.
   const real = useBilanxDualKeyValidationReal();
-  const mock = useMock() as any;
+  const mock = useMock();
 
   if (useRealCrypto) {
     return {
@@ -51,13 +51,11 @@ export function useDualKeyValidation(
     };
   }
 
-  // Return mock implementation (with adapter if needed)
+  // Return mock implementation
   return {
     state: mock.state,
     result: mock.result,
-    runDualKeyHandshake: mock.runDualKeyHandshake ?? (async () => {
-      console.warn('[useDualKeyValidation] Mock does not implement runDualKeyHandshake yet');
-    }),
-    reset: mock.reset ?? (() => {}),
+    runDualKeyHandshake: mock.runDualKeyHandshake,
+    reset: mock.reset,
   };
 }

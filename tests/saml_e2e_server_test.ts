@@ -20,18 +20,7 @@ import { createServer } from 'http';
 import { execSync } from 'child_process';
 import type { AddressInfo } from 'net';
 
-import {
-  generateSPMetadata,
-  generateAuthnRequest,
-  validateSAMLResponse,
-} from '../src/server/samlBridge.ts';
-import {
-  globalSessionStore,
-  extractSessionToken,
-  setSessionCookie,
-} from '../src/server/sessionManager.ts';
-import { recordAccessLog } from '../src/server/accessLogDb.ts';
-import type { SessionUser } from '../src/server/types/saml.ts';
+import { createApp, getErrorMessage } from '../src/server/app.ts';
 
 // Helper to get fresh fixtures directly from Python engine
 function getPythonFixture(funcCall: string): string {
@@ -42,172 +31,15 @@ function getPythonFixture(funcCall: string): string {
   return res.trim();
 }
 
-function getClientIp(req: express.Request): string {
-  const xff = req.headers['x-forwarded-for'];
-  if (Array.isArray(xff) && xff.length > 0) {
-    return xff[0].split(',')[0].trim();
-  }
-  if (typeof xff === 'string') {
-    return xff.split(',')[0].trim();
-  }
-  return req.ip || req.socket.remoteAddress || '127.0.0.1';
-}
-
-function getErrorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-// Build dedicated Express Test App with all SAML endpoints
-function buildTestApp(): express.Express {
-  const app = express();
-  app.use(express.urlencoded({ extended: true, limit: '2mb' }));
-  app.use(express.json());
-
-  // 1. Metadata
-  app.get(['/saml/metadata', '/metadata'], (req, res) => {
-    try {
-      const spEntityId = 'http://localhost:3099/saml/metadata';
-      const acsUrl = 'http://localhost:3099/saml/acs';
-      const metadataXml = generateSPMetadata(spEntityId, acsUrl);
-      res.setHeader('Content-Type', 'application/samlmetadata+xml; charset=utf-8');
-      res.send(metadataXml);
-    } catch (err: unknown) {
-      res.status(500).json({ error: getErrorMessage(err) });
-    }
-  });
-
-  // 2. AuthnRequest
-  app.all(['/saml/authn-request', '/saml/login'], (req, res) => {
-    try {
-      const loa = (req.body?.loa || req.query?.loa || 'substantial') as string;
-      const relayState = (req.body?.relayState || req.query?.relayState || '') as string;
-      const destination = (req.body?.destination || req.query?.destination) as string | undefined;
-
-      const result = generateAuthnRequest({
-        loa,
-        relayState,
-        destination,
-        spEntityId: 'http://localhost:3099/saml/metadata',
-        acsUrl: 'http://localhost:3099/saml/acs',
-      });
-
-      res.json({
-        success: true,
-        requestId: result.requestId,
-        destination: result.destination,
-        authnRequestXml: result.authnRequestXml,
-        samlRequestBase64: result.samlRequestBase64,
-        relayState: result.relayState,
-      });
-    } catch (err: unknown) {
-      res.status(500).json({ error: getErrorMessage(err) });
-    }
-  });
-
-  // 3. ACS Ingestion
-  app.post(['/saml/acs', '/auth/callback', '/saml/consume'], async (req, res) => {
-    try {
-      const clientIp = getClientIp(req);
-      const userAgent = req.headers['user-agent'] || 'E2E Test Runner';
-
-      const samlResponse = req.body?.SAMLResponse || req.body?.saml_response || req.body?.xml_content;
-      const relayState = req.body?.RelayState || req.body?.relayState || '/';
-
-      if (!samlResponse || typeof samlResponse !== 'string') {
-        res.status(400).json({ success: false, error: 'Missing SAMLResponse parameter.' });
-        return;
-      }
-
-      if (/<!\s*(DOCTYPE|ENTITY)/i.test(samlResponse)) {
-        res.status(400).json({
-          success: false,
-          error: 'Security Violation: DTD declarations or external entities are forbidden.',
-        });
-        return;
-      }
-
-      const validationResult = await validateSAMLResponse(samlResponse);
-
-      if (!validationResult.is_valid) {
-        const errMsg = validationResult.error_message || 'Validation failed';
-        const isBadRequest =
-          errMsg.includes('Missing mandatory') ||
-          errMsg.includes('Security Violation') ||
-          errMsg.includes('Invalid root tag') ||
-          errMsg.includes('Parser Error');
-
-        const statusCode = isBadRequest ? 400 : 401;
-        res.status(statusCode).json({ success: false, error: errMsg });
-        return;
-      }
-
-      const posContext = validationResult.pos_context!;
-      const claims = validationResult.claims || {};
-
-      const sessionUser: SessionUser = {
-        uid: posContext.user_id,
-        email: `${posContext.user_id.toLowerCase().replace(/[^a-z0-9]/g, '_')}@eidas.europa.eu`,
-        name:
-          posContext.given_name && posContext.family_name
-            ? `${posContext.given_name} ${posContext.family_name}`
-            : `eIDAS User ${posContext.user_id}`,
-        authMethod: 'eidas_saml',
-        role: posContext.role,
-        permissions: posContext.permissions,
-        levelOfAssurance: posContext.level_of_assurance,
-        personIdentifier: posContext.user_id,
-        familyName: posContext.family_name,
-        givenName: posContext.given_name,
-        dateOfBirth: posContext.date_of_birth,
-        age: posContext.age,
-        isOver18: posContext.is_over_18,
-        isOver21: posContext.is_over_21,
-        authenticatedAt: new Date().toISOString(),
-        expiresAt: Date.now() + 4 * 60 * 60 * 1000,
-        issuer: claims.issuer,
-        posContext,
-      };
-
-      const { token: sessionToken } = globalSessionStore.createSession(sessionUser);
-      setSessionCookie(res, sessionToken);
-
-      res.json({
-        success: true,
-        relayState,
-        sessionToken,
-        user: sessionUser,
-        pos_context: posContext,
-      });
-    } catch (err: unknown) {
-      res.status(500).json({ success: false, error: getErrorMessage(err) });
-    }
-  });
-
-  // 4. Session check
-  app.get('/saml/session', (req, res) => {
-    const token = extractSessionToken(req);
-    if (!token) {
-      res.status(401).json({ active: false, error: 'No active SAML session token found.' });
-      return;
-    }
-    const session = globalSessionStore.getSession(token);
-    if (!session) {
-      res.status(401).json({ active: false, error: 'Session has expired or is invalid.' });
-      return;
-    }
-    res.json({ active: true, user: session });
-  });
-
-  return app;
-}
-
 // Test Runner
 async function runE2ETests() {
   console.log('======================================================================');
   console.log('🚀 STARTING eIDAS 2.0 SAML INTEGRATION & HARDENING E2E TEST SUITE');
   console.log('======================================================================\n');
 
-  const app = buildTestApp();
+  process.env.SAML_SP_ENTITY_ID = 'http://localhost:3099/saml/metadata';
+  process.env.SAML_SP_ACS_URL = 'http://localhost:3099/saml/acs';
+  const app = createApp({ isTest: true });
   const server = createServer(app);
 
   await new Promise<void>((resolve) => {
@@ -282,14 +114,14 @@ async function runE2ETests() {
       if (data.relayState !== '/pos') {
         throw new Error(`Expected relayState '/pos', got ${data.relayState}`);
       }
-      if (data.user.personIdentifier !== 'IT/IT/TINIT-PLGDNL85M01H501Z') {
-        throw new Error(`Wrong PersonIdentifier: ${data.user.personIdentifier}`);
+      if (data.user.personIdentifier !== undefined || data.user.familyName !== undefined || data.user.givenName !== undefined || data.user.dateOfBirth !== undefined || data.user.name !== 'eIDAS User') {
+        throw new Error(`PII leaked in user object! ${JSON.stringify(data.user)}`);
       }
-      if (data.user.familyName !== 'Palagi' || data.user.givenName !== 'Daniele') {
-        throw new Error(`Wrong Name: ${data.user.givenName} ${data.user.familyName}`);
+      if (data.pos_context.personIdentifier !== undefined || data.pos_context.familyName !== undefined || data.pos_context.givenName !== undefined || data.pos_context.dateOfBirth !== undefined) {
+        throw new Error(`PII leaked in pos_context object! ${JSON.stringify(data.pos_context)}`);
       }
-      if (data.user.dateOfBirth !== '1985-08-01' || !data.user.isOver18) {
-        throw new Error(`Age check failed: DOB=${data.user.dateOfBirth}, over18=${data.user.isOver18}`);
+      if (!data.user.isOver18) {
+        throw new Error(`Age check failed: over18=${data.user.isOver18}`);
       }
       if (data.user.role !== 'STORE_MANAGER') {
         throw new Error(`Wrong role for substantial LoA: ${data.user.role}`);
@@ -300,6 +132,16 @@ async function runE2ETests() {
       const setCookie = res.headers.get('set-cookie');
       if (!setCookie || !setCookie.includes('session_token=')) {
         throw new Error(`Missing Set-Cookie header: ${setCookie}`);
+      }
+
+      // Check log (wait for async flush)
+      await new Promise(resolve => setTimeout(resolve, 200));
+      const fs = await import('fs');
+      const logContent = fs.readFileSync('data/access_logs.json', 'utf8');
+      const logs = JSON.parse(logContent);
+      const lastLog = logs.find((l: any) => l.action === 'LOGIN_SUCCESS') || logs[0];
+      if (lastLog.personIdentifier !== undefined || lastLog.familyName !== undefined || lastLog.givenName !== undefined || lastLog.dateOfBirth !== undefined || lastLog.name !== 'eIDAS User') {
+        throw new Error(`PII leaked in access log! ${JSON.stringify(lastLog)}`);
       }
     });
 
@@ -323,8 +165,8 @@ async function runE2ETests() {
       }
       const data = await res.json();
       if (!data.success) throw new Error(`ECDSA form POST failed: ${JSON.stringify(data)}`);
-      if (data.user.personIdentifier !== 'IT/IT/TINIT-PLGDNL85M01H501Z') {
-        throw new Error(`Wrong user: ${data.user.personIdentifier}`);
+      if (data.user.name !== 'eIDAS User') {
+        throw new Error(`Wrong user name: ${data.user.name}`);
       }
     });
 
@@ -470,13 +312,64 @@ async function runE2ETests() {
       if (res.status !== 200) throw new Error(`Expected 200, got ${res.status}`);
       const data = await res.json();
       if (!data.active) throw new Error('Session reported as inactive');
-      if (data.user.personIdentifier !== 'IT/IT/TINIT-PLGDNL85M01H501Z') {
-        throw new Error(`Wrong user in session: ${data.user.personIdentifier}`);
+      if (data.user.name !== 'eIDAS User') {
+        throw new Error(`Wrong user name in session: ${data.user.name}`);
       }
 
       // Request without token -> 401
       const unauthRes = await fetch(`${baseUrl}/saml/session`);
       if (unauthRes.status !== 401) throw new Error(`Expected 401 for unauthenticated session check, got ${unauthRes.status}`);
+    });
+
+    // 14. Negative Vector: Null-Byte Payload Injection Defense
+    await testCase('14. Negative Vector: Null-byte injection is blocked', async () => {
+      const validXml = getPythonFixture('get_valid_rsa_response()');
+      const nullInjected = validXml.slice(0, 50) + '\0' + validXml.slice(50);
+      const res = await fetch(`${baseUrl}/saml/acs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ SAMLResponse: nullInjected }),
+      });
+      const data = await res.json();
+      if (res.status !== 400 && res.status !== 401) throw new Error(`Expected 400 or 401, got ${res.status}`);
+      if (!data.error?.includes('Null bytes detected')) {
+        throw new Error(`Expected null bytes detected error, got: ${data.error}`);
+      }
+    });
+
+    // 15. Negative Vector: Corrupted / Non-Base64 Characters in SignatureValue
+    await testCase('15. Negative Vector: Malformed Base64 in SignatureValue fails verification', async () => {
+      const validXml = getPythonFixture('get_valid_rsa_response()');
+      const corruptedSigXml = validXml.replace('</ds:SignatureValue>', '???!!!</ds:SignatureValue>');
+      const res = await fetch(`${baseUrl}/saml/acs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ SAMLResponse: corruptedSigXml }),
+      });
+      const data = await res.json();
+      if (res.status !== 401) throw new Error(`Expected 401, got ${res.status}`);
+      if (!data.error?.includes('Cryptographic Verification Failed')) {
+        throw new Error(`Expected Cryptographic Verification Failed, got: ${data.error}`);
+      }
+    });
+
+    // 16. Negative Vector: XML Signature Wrapping (Duplicate Signature Element)
+    await testCase('16. Negative Vector: Duplicate ds:Signature element rejected as XSW attack', async () => {
+      const validXml = getPythonFixture('get_valid_rsa_response()');
+      const sigStart = validXml.indexOf('<ds:Signature');
+      const sigEnd = validXml.indexOf('</ds:Signature>') + '</ds:Signature>'.length;
+      const sigBlock = validXml.slice(sigStart, sigEnd);
+      const tamperedXml = validXml.slice(0, sigEnd) + sigBlock + validXml.slice(sigEnd);
+      const res = await fetch(`${baseUrl}/saml/acs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ SAMLResponse: tamperedXml }),
+      });
+      const data = await res.json();
+      if (res.status !== 401) throw new Error(`Expected 401, got ${res.status}`);
+      if (!data.error?.includes('XSW Defense Violation')) {
+        throw new Error(`Expected XSW Defense Violation, got: ${data.error}`);
+      }
     });
 
   } finally {

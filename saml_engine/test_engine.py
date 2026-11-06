@@ -379,5 +379,66 @@ class TestSAMLEngineHardened(unittest.TestCase):
             self.assertFalse(res2.is_valid)
             self.assertIn("Replay Attack Detected", res2.error_message)
 
+    def test_27_malformed_base64_signature_value(self):
+        """Verifies that non-base64 garbage or corrupted padding in ds:SignatureValue fails verification."""
+        xml = get_valid_rsa_response()
+        corrupted_xml = xml.replace("</ds:SignatureValue>", "???!!!</ds:SignatureValue>")
+        res = self.engine.validate_response(corrupted_xml)
+        self.assertFalse(res.is_valid)
+        self.assertIn("Cryptographic Verification Failed", res.error_message)
+
+    def test_28_multiple_signature_elements_rejection(self):
+        """Verifies that injecting a duplicate ds:Signature element into an Assertion is blocked as XSW attack."""
+        xml = get_valid_rsa_response()
+        # Duplicate the ds:Signature element inside Assertion
+        sig_start = xml.find("<ds:Signature")
+        sig_end = xml.find("</ds:Signature>") + len("</ds:Signature>")
+        sig_block = xml[sig_start:sig_end]
+        tampered_xml = xml[:sig_end] + sig_block + xml[sig_end:]
+        res = self.engine.validate_response(tampered_xml)
+        self.assertFalse(res.is_valid)
+        self.assertIn("XSW Defense Violation", res.error_message)
+        self.assertIn("Multiple ds:Signature elements", res.error_message)
+
+    def test_29_multiple_reference_elements_rejection(self):
+        """Verifies that injecting a second ds:Reference in ds:SignedInfo is blocked as XSW attack."""
+        xml = get_valid_rsa_response()
+        ref_start = xml.find("<ds:Reference")
+        ref_end = xml.find("</ds:Reference>") + len("</ds:Reference>")
+        ref_block = xml[ref_start:ref_end]
+        tampered_xml = xml[:ref_end] + ref_block + xml[ref_end:]
+        res = self.engine.validate_response(tampered_xml)
+        self.assertFalse(res.is_valid)
+        self.assertIn("XSW Defense Violation", res.error_message)
+        self.assertIn("Expected exactly 1 ds:Reference", res.error_message)
+
+    def test_30_multiple_digest_values_rejection(self):
+        """Verifies that injecting a duplicate ds:DigestValue in ds:Reference is blocked as XSW attack."""
+        xml = get_valid_rsa_response()
+        dv_start = xml.find("<ds:DigestValue>")
+        dv_end = xml.find("</ds:DigestValue>") + len("</ds:DigestValue>")
+        dv_block = xml[dv_start:dv_end]
+        tampered_xml = xml[:dv_end] + dv_block + xml[dv_end:]
+        res = self.engine.validate_response(tampered_xml)
+        self.assertFalse(res.is_valid)
+        self.assertIn("XSW Defense Violation", res.error_message)
+        self.assertIn("Expected exactly 1 ds:DigestValue", res.error_message)
+
+    def test_31_doctype_split_newline_mixed_case(self):
+        """Verifies that a well-formed DOCTYPE declaration is rejected with Security Violation."""
+        payload = '<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+        res = self.engine.validate_authn_request(payload)
+        self.assertFalse(res.is_valid)
+        self.assertIn("Security Violation", res.error_message)
+
+    def test_32_doctype_utf16le_with_bom(self):
+        """Verifies that the same payload encoded in UTF-16LE with BOM is rejected with Security Violation."""
+        import codecs
+        payload = '<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+        utf16le_payload = codecs.BOM_UTF16_LE + payload.encode("utf-16le")
+        res = self.engine.validate_authn_request(utf16le_payload)
+        self.assertFalse(res.is_valid)
+        self.assertIn("Security Violation", res.error_message)
+
 if __name__ == "__main__":
     unittest.main()

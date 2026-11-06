@@ -203,6 +203,28 @@ export function encodeCborU8(data: any): Uint8Array {
     out.set(bytes, header.length);
     return out;
   }
+  if (Array.isArray(data)) {
+    const len = data.length;
+    let header: Uint8Array;
+    if (len < 24) header = new Uint8Array([0x80 + len]);
+    else if (len <= 0xff) header = new Uint8Array([0x98, len]);
+    else if (len <= 0xffff) header = new Uint8Array([0x99, (len >> 8) & 0xff, len & 0xff]);
+    else header = new Uint8Array([0x9a, (len >> 24) & 0xff, (len >> 16) & 0xff, (len >> 8) & 0xff, len & 0xff]);
+    const chunks: Uint8Array[] = [header];
+    let totalLen = header.length;
+    for (const item of data) {
+      const ei = encodeCborU8(item);
+      chunks.push(ei);
+      totalLen += ei.length;
+    }
+    const out = new Uint8Array(totalLen);
+    let offset = 0;
+    for (const c of chunks) {
+      out.set(c, offset);
+      offset += c.length;
+    }
+    return out;
+  }
   if (data instanceof Map) {
     const size = data.size;
     let header: Uint8Array;
