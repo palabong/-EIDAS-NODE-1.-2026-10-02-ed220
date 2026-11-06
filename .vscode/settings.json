@@ -1,3 +1,10 @@
 {
-  "workbench.startupEditor": "readme"
+  "workbench.startupEditor": "readme",
+  "debug.javascript.terminalOptions": {
+    "skipFiles": [
+      "<node_internals>/**",
+      "**/node_modules/**",
+      "/usr/local/Cellar/**"
+    ]
+  }
 }
