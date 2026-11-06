@@ -556,12 +556,24 @@ class SAMLValidationEngine:
         if trusted_certificates is not None:
             self.trusted_certificates = list(trusted_certificates)
         else:
-            resolved_dir = (
-                trusted_certs_dir
-                or os.environ.get("SAML_TRUSTED_CERTS_DIR")
-                or os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs")
+            explicit_dir = trusted_certs_dir or os.environ.get("SAML_TRUSTED_CERTS_DIR")
+            resolved_dir = explicit_dir or os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "certs"
             )
             self.trusted_certificates = load_trusted_certificates_from_directory(resolved_dir)
+            # If no explicit SAML_TRUSTED_CERTS_DIR was forced and no production certs are mounted,
+            # also accept ephemeral sandbox IdP certificates generated in OS temp storage
+            if (
+                not explicit_dir
+                and not self.trusted_certificates
+                and os.environ.get("SAML_DISABLE_EPHEMERAL_CERTS", "").lower() != "true"
+            ):
+                ephemeral_certs_dir = os.path.join(
+                    tempfile.gettempdir(), f"bilanx_ephemeral_saml_{os.getuid()}", "certs"
+                )
+                self.trusted_certificates = load_trusted_certificates_from_directory(
+                    ephemeral_certs_dir
+                )
 
         self.trusted_fingerprints: Set[str] = set()
         if trusted_fingerprints:

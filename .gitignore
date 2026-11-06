@@ -29,9 +29,10 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Architecture Hygiene & Non-Production Isolation (R1)
+# Local IDE, Agent, MCP Settings & Non-Production Isolation
+.gemini/
+.antigravity/
+.agents/
 archive/
 _archive/
-.agents/
-.antigravity/
-
+*.pbtxt

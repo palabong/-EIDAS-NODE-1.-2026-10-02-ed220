@@ -334,6 +334,12 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
     next();
   };
 
+  // Expose public OAuth client configuration dynamically from runtime environment / Secret Manager
+  app.get("/api/auth/config", (_req, res) => {
+    const googleClientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || null;
+    res.json({ googleClientId });
+  });
+
   // Verify Google Identity Services ID Token / Credential (REM-02 Hardened)
   app.post("/api/auth/verify-google", async (req, res) => {
     try {

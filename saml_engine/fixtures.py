@@ -5,78 +5,135 @@ and negative security vectors (tampering, expiration, replay, audience mismatch,
 """
 
 import os
+import fcntl
 import base64
 import hashlib
 import subprocess
 import tempfile
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 # =============================================================================
-# PERSISTENT CRYPTOGRAPHIC KEYPAIRS & CERTIFICATES (Validity: 2026 - 2046)
+# ENVIRONMENT / SECRET MANAGER OR EPHEMERAL SANDBOX KEYPAIRS (ZERO REPO SECRETS)
 # =============================================================================
 
-IDP_RSA_KEY_PEM = """[REDACTED_PEM_PRIVATE_KEY]"""
+EPHEMERAL_SAML_DIR = os.path.join(
+    tempfile.gettempdir(), f"bilanx_ephemeral_saml_{os.getuid()}"
+)
+EPHEMERAL_TRUSTED_CERTS_DIR = os.path.join(EPHEMERAL_SAML_DIR, "certs")
 
-IDP_RSA_CERT_PEM = """-----BEGIN CERTIFICATE-----
-MIIDRzCCAi+gAwIBAgIUDcnHJcvFoif+AP0vPNMFeo1G78kwDQYJKoZIhvcNAQEL
-BQAwMzEXMBUGA1UEAwwOZUlEQVMgVGVzdCBJZFAxCzAJBgNVBAoMAkVVMQswCQYD
-VQQGEwJFVTAeFw0yNjEwMDIyMjI3MzJaFw00NjA5MjcyMjI3MzJaMDMxFzAVBgNV
-BAMMDmVJREFTIFRlc3QgSWRQMQswCQYDVQQKDAJFVTELMAkGA1UEBhMCRVUwggEi
-MA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCXRt3zM5Bp33ooU1IcgCcmXmWT
-rkqF7qICq77FoFH6bDAePF8Ih+BNnRdqzP0z4tgxvuu2VL4cUKWvMZ202Y7mFmoV
-A20KO+uU+QPnqWVGYH4SuNRO/X8OO2Ruwc5evDG13sM4IbJk7P146vyWloAuNgxd
-IS2bgOOV5sEKBnkLCkcs10UhVIbNoaUlurIFly+w+hDMmNpULi01LZz0Q1zemj+S
-w3rNvZkiZfLboWSEHwO4DsmwGB67SNGJ23qoaJTfZAdP1kqEP04MT77H2ik50w38
-eVHCNuXA7VsrgIFeiUVIzO55Xjx4MBcpkzoIS7cW7249O0scjC7WCEaGD/mzAgMB
-AAGjUzBRMB0GA1UdDgQWBBSSbcxpIq+/kA9asKjEw0Jg1LO67jAfBgNVHSMEGDAW
-gBSSbcxpIq+/kA9asKjEw0Jg1LO67jAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3
-DQEBCwUAA4IBAQAXAOL8k7j2IsVEcBnhBrj93zkaczlR+QpSY0NuSSWz+jgp51q3
-xrYh2//5vAuYvmGfArK/tpP8yQN7z6bvjeM1VjyZ285UaftaAepinSW8PSy5xsHy
-BDhogQXlUXHQ/L9cR9GH2CYlEYzehyzV3HKnCLOZ5JjhbgTOsJZB94BcffVN2kab
-iEmc8dteXEMl/jamk86Tq6xhgg8s0J6mz4K3noJ11CJT1tbMh3sXoxUrZ6sf336C
-AaFcE2goEOhIjdxcEiQoQxm9YcUrqJ6V6ufPchYQ+4HVUK1cYOV643IluEn0zM+2
-2gpM1WZ1LdX8NLJ/ihjwdYv0E/YSxJzKoq5u
------END CERTIFICATE-----"""
 
-IDP_EC_KEY_PEM = """[REDACTED_PEM_PRIVATE_KEY]"""
+def _read_optional_file(file_path: Optional[str]) -> Optional[str]:
+    if not file_path:
+        return None
+    if os.path.exists(file_path):
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    return None
 
-IDP_EC_CERT_PEM = """-----BEGIN CERTIFICATE-----
-MIIBwjCCAWegAwIBAgIUCl9FEnJWaGTAQa3OksF8pbqBCzowCgYIKoZIzj0EAwIw
-NjEaMBgGA1UEAwwRZUlEQVMgVGVzdCBFQyBJZFAxCzAJBgNVBAoMAkVVMQswCQYD
-VQQGEwJFVTAeFw0yNjEwMDIyMjI3MzJaFw00NjA5MjcyMjI3MzJaMDYxGjAYBgNV
-BAMMEWVJREFTIFRlc3QgRUMgSWRQMQswCQYDVQQKDAJFVTELMAkGA1UEBhMCRVUw
-WTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATmnIm23PnIiaknhVGMXFWGT4wcLEW1
-dqtaxrVYfAo5wZN9H8duE5IrdUykFYJGbViQfvL0ex8x61UkvJYKBBlIo1MwUTAd
-BgNVHQ4EFgQUfDY08b8Dj4bzespi4leCBIDr3S0wHwYDVR0jBBgwFoAUfDY08b8D
-j4bzespi4leCBIDr3S0wDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNJADBG
-AiEAolPQPfL1S8rwL0dB2PqbEBbhrXdDzwvEnJVNP4vJGtQCIQCiWT4igAIJQz+3
-x8iqI5ag8LxzmXOMwSc1Y5oXTOpaQw==
------END CERTIFICATE-----"""
 
-SP_RSA_KEY_PEM = """[REDACTED_PEM_PRIVATE_KEY]"""
+def _load_or_generate_fixture_keypair(
+    env_prefix: str,
+    file_stem: str,
+    algorithm: str,
+    subject: str,
+    export_to_trusted_idp_dir: bool = False,
+) -> Tuple[str, str]:
+    """
+    Loads SAML signing keypair from environment variables or Secret Manager file mounts,
+    falling back to dynamically generated ephemeral keypairs in OS temp storage for
+    local development, sandbox demos, and automated CI test suites.
+    """
+    env_key = os.environ.get(f"{env_prefix}_KEY_PEM", "").strip()
+    env_cert = os.environ.get(f"{env_prefix}_CERT_PEM", "").strip()
+    if env_key and env_cert:
+        return env_key, env_cert
 
-SP_RSA_CERT_PEM = """-----BEGIN CERTIFICATE-----
-MIIDazCCAlOgAwIBAgIUNz/QFyoOUVQ/4EXB2E1cns2IS44wDQYJKoZIhvcNAQEL
-BQAwRTEdMBsGA1UEAwwUQmlsYW54IGVJREFTIFNQIE5vZGUxFzAVBgNVBAoMDlBy
-b2plY3QgQmlsYW54MQswCQYDVQQGEwJFVTAeFw0yNjEwMDIyMjI3MzJaFw00NjA5
-MjcyMjI3MzJaMEUxHTAbBgNVBAMMFEJpbGFueCBlSURBUyBTUCBOb2RlMRcwFQYD
-VQQKDA5Qcm9qZWN0IEJpbGFueDELMAkGA1UEBhMCRVUwggEiMA0GCSqGSIb3DQEB
-AQUAA4IBDwAwggEKAoIBAQDJIGjGaCYPBBUuPxuFYWp/H0ThwRD7zQpS4K6mVqw4
-PX+fx35dpwcIuAhwMg8PTbSuEAe8cn6MwD/UAMuXXC3DWqRD2A4ElUvzd6cz3wxf
-H+xk6pmiirjwmEcbkLCEsORMIMt5zT0t5gSKg1V89mNfHYU6d5/Lq9HztQrcIqTW
-WhvU61XJLPA1YRZd3c27x8dMeiCwxbgEh5+YFwiY420hyOD4SF3+IBxmO4aXE0P1
-vQJKSIRp4O6wwvEh/de/rAcNPYDD+q/HymMDtRnNwwR/rjoA30VIcejS2RC12Sv3
-bwXMuFfZlPDowU5LylE6dQdFYKRMaCVi/Thes1pOOk41AgMBAAGjUzBRMB0GA1Ud
-DgQWBBQSoM5HJfi/fl+XHVAWMamD+QY95TAfBgNVHSMEGDAWgBQSoM5HJfi/fl+X
-HVAWMamD+QY95TAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBc
-rBklVVYxwqGfXrvEzcU2v5J5xFdBeMFOQZjsogDJIB5MQWJUSuNjMTsGVquWiO8+
-rG4P1uKorDASUpVs9IAU4ccC4/dH7/D7GJ718opQXzeLn/xx/pdr+wgh79sOPX0z
-+sAqcYpowZVmo0xqJJHnMy1BoT4o70hz63AnwMU5wyi1WVoMYZqCuk3EqJZHAE2K
-peuCIKo3iYKtp8g8x0YY4BrItXilBrvluQmu41U7/jP91JlBQcrq9EuC+ejMZcxR
-Rnx2ULb1WnXUHP7iIZY7tbuXrqRQscLuP68IPhdC/iUjJ7SoFYfPms26nbVUOiiX
-WVYVNqap28CrY9Rxo3s5
------END CERTIFICATE-----"""
+    path_key = _read_optional_file(os.environ.get(f"{env_prefix}_KEY_PATH"))
+    path_cert = _read_optional_file(os.environ.get(f"{env_prefix}_CERT_PATH"))
+    if path_key and path_cert:
+        return path_key, path_cert
+
+    os.makedirs(EPHEMERAL_SAML_DIR, mode=0o700, exist_ok=True)
+    os.makedirs(EPHEMERAL_TRUSTED_CERTS_DIR, mode=0o700, exist_ok=True)
+    lock_path = os.path.join(EPHEMERAL_SAML_DIR, ".keygen.lock")
+    key_path = os.path.join(EPHEMERAL_SAML_DIR, f"{file_stem}.key")
+    cert_path = os.path.join(EPHEMERAL_SAML_DIR, f"{file_stem}.crt")
+    trusted_cert_copy = os.path.join(EPHEMERAL_TRUSTED_CERTS_DIR, f"{file_stem}.crt")
+
+    with open(lock_path, "w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            if not (os.path.exists(key_path) and os.path.exists(cert_path)):
+                if algorithm == "rsa":
+                    cmd = [
+                        "openssl", "req", "-x509",
+                        "-newkey", "rsa:2048",
+                        "-nodes",
+                        "-keyout", key_path,
+                        "-out", cert_path,
+                        "-days", "365",
+                        "-subj", subject,
+                    ]
+                elif algorithm == "ec":
+                    cmd = [
+                        "openssl", "req", "-x509",
+                        "-newkey", "ec",
+                        "-pkeyopt", "ec_paramgen_curve:prime256v1",
+                        "-nodes",
+                        "-keyout", key_path,
+                        "-out", cert_path,
+                        "-days", "365",
+                        "-subj", subject,
+                    ]
+                else:
+                    raise ValueError(f"Unsupported fixture key algorithm: {algorithm}")
+
+                subprocess.run(
+                    cmd,
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                os.chmod(key_path, 0o600)
+
+            with open(key_path, "r", encoding="utf-8") as kf:
+                key_pem = kf.read().strip()
+            with open(cert_path, "r", encoding="utf-8") as cf:
+                cert_pem = cf.read().strip()
+
+            if export_to_trusted_idp_dir and not os.path.exists(trusted_cert_copy):
+                with open(trusted_cert_copy, "w", encoding="utf-8") as tf:
+                    tf.write(cert_pem + "\n")
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    return key_pem, cert_pem
+
+
+IDP_RSA_KEY_PEM, IDP_RSA_CERT_PEM = _load_or_generate_fixture_keypair(
+    env_prefix="SAML_IDP_RSA",
+    file_stem="idp_rsa",
+    algorithm="rsa",
+    subject="/C=EU/O=EU/CN=eIDAS Ephemeral Test IdP",
+    export_to_trusted_idp_dir=True,
+)
+
+IDP_EC_KEY_PEM, IDP_EC_CERT_PEM = _load_or_generate_fixture_keypair(
+    env_prefix="SAML_IDP_EC",
+    file_stem="idp_ec",
+    algorithm="ec",
+    subject="/C=EU/O=EU/CN=eIDAS Ephemeral Test EC IdP",
+    export_to_trusted_idp_dir=True,
+)
+
+SP_RSA_KEY_PEM, SP_RSA_CERT_PEM = _load_or_generate_fixture_keypair(
+    env_prefix="SAML_SP_RSA",
+    file_stem="sp_rsa",
+    algorithm="rsa",
+    subject="/C=EU/O=Project Bilanx/CN=Bilanx eIDAS SP Node",
+    export_to_trusted_idp_dir=False,
+)
 
 def _clean_cert_b64(cert_pem: str) -> str:
     lines = [l.strip() for l in cert_pem.strip().splitlines() if not l.startswith("-----")]

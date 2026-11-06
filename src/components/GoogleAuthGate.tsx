@@ -26,70 +26,96 @@ export function GoogleAuthGate({
   const [gsiLoaded, setGsiLoaded] = useState(false);
   const buttonContainerRef = useRef<HTMLDivElement>(null);
 
-  // Initialize official Google Identity Services client
+  // Initialize official Google Identity Services client via build env or runtime /api/auth/config
   useEffect(() => {
-    const clientId = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || 'your_client_id.apps.googleusercontent.com';
-    
-    const initGoogleButton = () => {
-      if (typeof window !== 'undefined' && window.google?.accounts?.id && buttonContainerRef.current) {
-        try {
-          window.google.accounts.id.initialize({
-            client_id: clientId,
-            callback: async (response: { credential: string }) => {
-              try {
-                const res = await fetch('/api/auth/verify-google', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-                  body: JSON.stringify({ credential: response.credential }),
-                });
-                const contentType = res.headers.get('content-type') || '';
-                if (contentType.includes('application/json')) {
-                  const data = await res.json();
-                  if (data.success && data.user) {
-                    const verifiedUser = {
-                      ...data.user,
-                      sessionToken: data.sessionToken
-                    };
-                    localStorage.setItem('bilanx_verified_google_user', JSON.stringify(verifiedUser));
-                    onLoginSuccess(verifiedUser);
-                  }
-                }
-              } catch (err) {
-                console.error("Google Sign-In callback error:", err);
-              }
-            },
-          });
+    let cancelled = false;
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-          buttonContainerRef.current.innerHTML = '';
-          window.google.accounts.id.renderButton(
-            buttonContainerRef.current,
-            {
-              type: 'standard',
-              theme: 'filled_blue',
-              size: 'large',
-              text: 'signin_with',
-              shape: 'rectangular',
-              logo_alignment: 'left',
-              width: 320
-            }
-          );
-          setGsiLoaded(true);
-          return true;
-        } catch (err) {
-          console.warn("Could not render official Google button:", err);
+    const setupClient = async () => {
+      let clientId: string | null = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || null;
+      if (!clientId) {
+        try {
+          const cfgRes = await fetch('/api/auth/config', { headers: { Accept: 'application/json' } });
+          if (cfgRes.ok) {
+            const cfg = await cfgRes.json();
+            clientId = cfg?.googleClientId || null;
+          }
+        } catch {
+          // Ignore network error in offline sandbox mode
         }
       }
-      return false;
+      if (!clientId || cancelled) {
+        return;
+      }
+
+      const initGoogleButton = () => {
+        if (typeof window !== 'undefined' && window.google?.accounts?.id && buttonContainerRef.current) {
+          try {
+            window.google.accounts.id.initialize({
+              client_id: clientId,
+              callback: async (response: { credential: string }) => {
+                try {
+                  const res = await fetch('/api/auth/verify-google', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({ credential: response.credential }),
+                  });
+                  const contentType = res.headers.get('content-type') || '';
+                  if (contentType.includes('application/json')) {
+                    const data = await res.json();
+                    if (data.success && data.user) {
+                      const verifiedUser = {
+                        ...data.user,
+                        sessionToken: data.sessionToken
+                      };
+                      localStorage.setItem('bilanx_verified_google_user', JSON.stringify(verifiedUser));
+                      onLoginSuccess(verifiedUser);
+                    }
+                  }
+                } catch (err) {
+                  console.error("Google Sign-In callback error:", err);
+                }
+              },
+            });
+
+            buttonContainerRef.current.innerHTML = '';
+            window.google.accounts.id.renderButton(
+              buttonContainerRef.current,
+              {
+                type: 'standard',
+                theme: 'filled_blue',
+                size: 'large',
+                text: 'signin_with',
+                shape: 'rectangular',
+                logo_alignment: 'left',
+                width: 320
+              }
+            );
+            setGsiLoaded(true);
+            return true;
+          } catch (err) {
+            console.warn("Could not render official Google button:", err);
+          }
+        }
+        return false;
+      };
+
+      if (!initGoogleButton()) {
+        pollTimer = setInterval(() => {
+          if (initGoogleButton() && pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+          }
+        }, 300);
+      }
     };
 
-    if (!initGoogleButton()) {
-      const interval = setInterval(() => {
-        if (initGoogleButton()) {
-          clearInterval(interval);
-        }
-      }, 300);
-      return () => clearInterval(interval);
-    }
+    setupClient();
+
+    return () => {
+      cancelled = true;
+      if (pollTimer) clearInterval(pollTimer);
+    };
   }, [onLoginSuccess]);
 
   return (

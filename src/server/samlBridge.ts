@@ -3,8 +3,9 @@
  * Supports CLI subprocess execution, HTTP microservice forwarding, and native cryptographic verification.
  */
 
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import crypto from 'crypto';
+import fs from 'fs';
 import type { SAMLValidationResponse, LoALevel } from './types/saml.ts';
 
 const SAML_ENGINE_URL = process.env.SAML_ENGINE_URL || 'http://127.0.0.1:8000';
@@ -12,27 +13,25 @@ const DEFAULT_SP_ENTITY_ID = process.env.SAML_SP_ENTITY_ID || 'http://localhost:
 const DEFAULT_SP_ACS_URL = process.env.SAML_SP_ACS_URL || 'http://localhost:3000/saml/acs';
 const DEFAULT_IDP_SSO_URL = process.env.SAML_IDP_SSO_URL || 'http://peps.local:9090/PEPS/ServiceProvider';
 
-export const SP_CERT_PEM = `-----BEGIN CERTIFICATE-----
-MIIDazCCAlOgAwIBAgIUNz/QFyoOUVQ/4EXB2E1cns2IS44wDQYJKoZIhvcNAQEL
-BQAwRTEdMBsGA1UEAwwUQmlsYW54IGVJREFTIFNQIE5vZGUxFzAVBgNVBAoMDlBy
-b2plY3QgQmlsYW54MQswCQYDVQQGEwJFVTAeFw0yNjEwMDIyMjI3MzJaFw00NjA5
-MjcyMjI3MzJaMEUxHTAbBgNVBAMMFEJpbGFueCBlSURBUyBTUCBOb2RlMRcwFQYD
-VQQKDA5Qcm9qZWN0IEJpbGFueDELMAkGA1UEBhMCRVUwggEiMA0GCSqGSIb3DQEB
-AQUAA4IBDwAwggEKAoIBAQDJIGjGaCYPBBUuPxuFYWp/H0ThwRD7zQpS4K6mVqw4
-PX+fx35dpwcIuAhwMg8PTbSuEAe8cn6MwD/UAMuXXC3DWqRD2A4ElUvzd6cz3wxf
-H+xk6pmiirjwmEcbkLCEsORMIMt5zT0t5gSKg1V89mNfHYU6d5/Lq9HztQrcIqTW
-WhvU61XJLPA1YRZd3c27x8dMeiCwxbgEh5+YFwiY420hyOD4SF3+IBxmO4aXE0P1
-vQJKSIRp4O6wwvEh/de/rAcNPYDD+q/HymMDtRnNwwR/rjoA30VIcejS2RC12Sv3
-bwXMuFfZlPDowU5LylE6dQdFYKRMaCVi/Thes1pOOk41AgMBAAGjUzBRMB0GA1Ud
-DgQWBBQSoM5HJfi/fl+XHVAWMamD+QY95TAfBgNVHSMEGDAWgBQSoM5HJfi/fl+X
-HVAWMamD+QY95TAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBc
-rBklVVYxwqGfXrvEzcU2v5J5xFdBeMFOQZjsogDJIB5MQWJUSuNjMTsGVquWiO8+
-rG4P1uKorDASUpVs9IAU4ccC4/dH7/D7GJ718opQXzeLn/xx/pdr+wgh79sOPX0z
-+sAqcYpowZVmo0xqJJHnMy1BoT4o70hz63AnwMU5wyi1WVoMYZqCuk3EqJZHAE2K
-peuCIKo3iYKtp8g8x0YY4BrItXilBrvluQmu41U7/jP91JlBQcrq9EuC+ejMZcxR
-Rnx2ULb1WnXUHP7iIZY7tbuXrqRQscLuP68IPhdC/iUjJ7SoFYfPms26nbVUOiiX
-WVYVNqap28CrY9Rxo3s5
------END CERTIFICATE-----`;
+function resolveSpCertificatePem(): string {
+  if (process.env.SAML_SP_CERT_PEM && process.env.SAML_SP_CERT_PEM.trim()) {
+    return process.env.SAML_SP_CERT_PEM.trim();
+  }
+  if (process.env.SAML_SP_CERT_PATH && fs.existsSync(process.env.SAML_SP_CERT_PATH)) {
+    return fs.readFileSync(process.env.SAML_SP_CERT_PATH, 'utf-8').trim();
+  }
+  const pyRes = spawnSync('python3', ['-c', 'from saml_engine.fixtures import SP_RSA_CERT_PEM; print(SP_RSA_CERT_PEM)'], {
+    cwd: process.cwd(),
+    env: process.env,
+    encoding: 'utf-8',
+  });
+  if (pyRes.status === 0 && pyRes.stdout && pyRes.stdout.includes('BEGIN CERTIFICATE')) {
+    return pyRes.stdout.trim();
+  }
+  throw new Error('Unable to resolve SAML SP certificate from SAML_SP_CERT_PEM, SAML_SP_CERT_PATH, or ephemeral sandbox generator.');
+}
+
+export const SP_CERT_PEM = resolveSpCertificatePem();
 
 /**
  * Returns formatted SAML 2.0 SP EntityDescriptor Metadata XML

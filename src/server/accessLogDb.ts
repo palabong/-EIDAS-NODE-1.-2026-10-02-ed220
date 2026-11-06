@@ -127,13 +127,13 @@ function schedulePersistLogs() {
   }, 50);
 }
 
-const GCP_PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCP_PROJECT || 'your-gcp-project-id';
+const GCP_PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCP_PROJECT || '';
 const FIRESTORE_DATABASE_ID = process.env.FIRESTORE_DATABASE_ID || '(default)';
 let gcpAuthClient: GoogleAuth | null = null;
 
 async function persistToFirestore(log: AccessLog): Promise<void> {
-  // Only attempt Firestore persistence if in cloud environment or explicitly enabled
-  if (!process.env.K_SERVICE && !process.env.FIRESTORE_DATABASE_ID && process.env.USE_FIRESTORE !== 'true') {
+  // Only attempt Firestore persistence if in cloud environment or explicitly enabled with a configured project
+  if (!GCP_PROJECT_ID || (!process.env.K_SERVICE && !process.env.FIRESTORE_DATABASE_ID && process.env.USE_FIRESTORE !== 'true')) {
     return;
   }
 
