@@ -1,12 +1,12 @@
 /**
  * Configuration-Driven Dual-Jurisdiction Regulatory Policy Profiles
- * Project Bilanx — TRL 6 Operational Pilot Sandbox
+ * Project Bilanx — lab pilot profiles
  * 
  * Defines regulatory profiles for:
  * 1. Swiss Profile (CH - FADP / Retail POS)
  *    - Strict 18+ gate for tobacco, nicotine, alcohol, and lottery
- *    - Strict zero-PII boolean verification (0 bytes personal data transmitted)
- *    - 1,355-byte NIST P-256 B2 Sigma range proof
+ *    - The HTTP clearance records the citizen name and date of birth only on the client
+ *    - 1,355-byte NIST P-256 B2 Sigma range proof, accepted only when its threshold byte is 18
  *    - Sub-1.5s retail POS transaction envelope
  * 
  * 2. Italian Profile (IT - AgCom & eIDAS LoA High)

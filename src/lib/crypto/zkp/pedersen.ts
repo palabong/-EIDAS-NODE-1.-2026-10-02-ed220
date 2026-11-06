@@ -24,12 +24,11 @@ export type PedersenCommitment = {
 function generateBlindingFactor(): bigint {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  let hex = '';
-  for (let i = 0; i < bytes.length; i++) {
-    hex += bytes[i].toString(16).padStart(2, '0');
+  let value = 0n;
+  for (const byte of bytes) {
+    value = (value << 8n) | BigInt(byte);
   }
-  // Modulo the curve order to ensure it's a valid scalar
-  return BigInt('0x' + hex) % p256.Point.Fn.ORDER;
+  return value % p256.Point.Fn.ORDER;
 }
 
 /**
@@ -47,13 +46,6 @@ export function pedersenCommit(secret: bigint, blindingFactor?: bigint): Pederse
     commitment: C.toBytes(true), // compressed point
     blindingFactor: r
   };
-}
-
-/**
- * Serialize commitment for transport / size measurement
- */
-export function serializeCommitment(commitment: Uint8Array): Uint8Array {
-  return commitment; // already compressed bytes
 }
 
 /**

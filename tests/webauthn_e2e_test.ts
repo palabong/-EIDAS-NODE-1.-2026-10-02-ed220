@@ -180,6 +180,43 @@ async function runWebAuthnTests() {
     passed++;
 
     // -------------------------------------------------------------------------
+    // Test 2b: Registration clientDataJSON without origin
+    // -------------------------------------------------------------------------
+    const missingOriginOptRes = await fetch(`${baseUrl}/api/webauthn/register-options`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username })
+    });
+    const missingOriginOptData = await missingOriginOptRes.json();
+    const missingOriginClientData = JSON.stringify({
+      type: 'webauthn.create',
+      challenge: missingOriginOptData.challenge
+    });
+    const missingOriginCredId = crypto.randomBytes(16);
+    const missingOriginAttestation = buildMockAttestationObject(rpId, missingOriginCredId, x, y);
+    const missingOriginRes = await fetch(`${baseUrl}/api/webauthn/register-verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username,
+        credential: {
+          id: missingOriginCredId.toString('base64url'),
+          response: {
+            clientDataJSON: Buffer.from(missingOriginClientData).toString('base64'),
+            attestationObject: missingOriginAttestation.toString('base64')
+          }
+        }
+      })
+    });
+    const missingOriginData = await missingOriginRes.json();
+    assert.strictEqual(missingOriginRes.status, 400);
+    assert.strictEqual(missingOriginData.verified, false);
+    assert.ok(String(missingOriginData.error).includes('Origin mismatch'));
+    assert.ok(String(missingOriginData.error).includes('missing'));
+    console.log('  ✅ [PASS] 2b. Registration without clientDataJSON.origin is rejected');
+    passed++;
+
+    // -------------------------------------------------------------------------
     // Test 3: Authentication Options
     // -------------------------------------------------------------------------
     const authOptRes = await fetch(`${baseUrl}/api/webauthn/authenticate-options`, {

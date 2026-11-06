@@ -75,7 +75,11 @@ async function runTestSuite() {
     assert(swissResult.citizen.age === 32, 'Citizen age is 32');
     assert(swissResult.citizen.fullName === 'Heinrich Keller', 'Plaintext PII maintained in client-side quarantine');
     assert(swissResult.quarantinedPii.status === 'QUARANTINED_CLIENT_ONLY', 'PII marked QUARANTINED_CLIENT_ONLY');
-    assert(swissResult.quarantinedPii.serverLeakageBytes === 0, 'Quarantined PII server leakage is strictly 0 bytes');
+    const swissWire = swissResult.outboundBodies.join('\n');
+    assert(
+      !swissWire.includes(swissResult.citizen.fullName) && !swissWire.includes(swissResult.citizen.dateOfBirth),
+      'Outbound HTTP bodies omit the citizen name and date of birth'
+    );
     assert(
       swissResult.hwFingerprint.startsWith('HE-P256-'),
       `Hardware fingerprint derived: ${swissResult.hwFingerprint}`

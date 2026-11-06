@@ -1,6 +1,6 @@
-import { generateProof, verifyProof } from '../src/sandbox/lib/nizkp.ts';
-import { generateBitwiseRangeProof, verifyBitwiseRangeProof } from '../src/sandbox/lib/crypto/range_b2.ts';
-import { encodeBitwiseRangeProof, decodeBitwiseRangeProof } from '../src/sandbox/lib/crypto/range_b2_codec.ts';
+import { generateProof, verifyProof } from '../src/lib/crypto/zkp/nizkp.ts';
+import { generateBitwiseRangeProof, verifyBitwiseRangeProof } from '../src/lib/crypto/zkp/range_b2.ts';
+import { encodeBitwiseRangeProof, decodeBitwiseRangeProof } from '../src/lib/crypto/zkp/range_b2_codec.ts';
 import { performance } from 'node:perf_hooks';
 
 async function runTests() {
@@ -67,9 +67,7 @@ async function runTests() {
   // T6: Tamper bit commitment
   try {
     const p6 = await generateBitwiseRangeProof(18, 18);
-    // alter a bit string
-    const original = p6.bits[0].s_0;
-    p6.bits[0].s_0 = original.replace(/[0-9a-f]/i, (c) => c === '0' ? '1' : '0'); 
+    p6.bits[0].s_0 = p6.bits[0].s_0 ^ 1n; 
     const p6_bytes = encodeBitwiseRangeProof(p6);
     const v6 = await verifyProof(p6_bytes);
     recordResult('T6', 'Tamper bit commitment', 'FAIL', v6 ? 'PASS' : 'FAIL', v6 ? 'FAIL' : 'PASS');

@@ -1,9 +1,10 @@
 import { performDualKeyHandshake } from '../../hooks/useBilanxDualKeyValidation.real';
-import { generateProof, verifyProof } from '../nizkp';
+import { generateProof } from '../../../lib/crypto/zkp/nizkp.ts';
+import { AGE_GATE_POLICY_THRESHOLD } from '../../../lib/crypto/clearanceMessage.ts';
 
 export type E2EAgeGateInput = {
   age: number;
-  threshold?: number; // default 18
+  threshold?: number; // server policy is 18; any other value is refused before a POST
 };
 
 export type E2EAgeGateResult = {
@@ -22,93 +23,78 @@ export type E2EAgeGateResult = {
   payload?: any;
 };
 
-export async function runDualKeyAgeGate(input: E2EAgeGateInput): Promise<E2EAgeGateResult> {
-  const totalT0 = performance.now();
-  const threshold = input.threshold ?? 18;
-
-  let dualKeyOk = false;
-  let ageGateOk = false;
-  let proofBytes = new Uint8Array(0);
-  let errorMsg: string | undefined = undefined;
-
-  let dualKey_ms = 0;
-  let server_dual_key_verify_ms: number | undefined;
-  let prove_ms = 0;
-  let verify_ms = 0;
-  let payload: any = undefined;
-
-  try {
-    // 1. Dual-Key Real Execution
-    const dkStart = performance.now();
-    // Using dummy IDs as this is just the cryptographic segment check
-    const dkResult = await performDualKeyHandshake('inst-sandbox', 'user-factor-123');
-    dualKey_ms = performance.now() - dkStart;
-
-    dualKeyOk = dkResult.success;
-    server_dual_key_verify_ms = dkResult.serverVerifyMs;
-    payload = dkResult.payload;
-
-    // HARD GATE
-    if (!dualKeyOk) {
-      errorMsg = dkResult.error || 'Dual-Key server verification failed';
-      const total_ms = performance.now() - totalT0;
-      return {
-        dualKeyOk: false,
-        ageGateOk: false,
-        proofBytes: new Uint8Array(0),
-        proofByteLength: 0,
-        timings: {
-          dualKey_ms,
-          server_dual_key_verify_ms,
-          prove_ms: 0,
-          verify_ms: 0,
-          total_ms,
-        },
-        error: errorMsg,
-      };
-    }
-
-    // 2. Age-Gate Generate
-    const proveStart = performance.now();
-    try {
-      // The generateProof might throw if age < threshold
-      // Wait, generateBitwiseRangeProof takes (age, threshold), but our nizkp facade
-      // generateProof only takes (age) and hardcodes 18.
-      // Let's import generateBitwiseRangeProof directly if we need to pass threshold,
-      // but the instructions say:
-      // "Age-gate segment must use the current production facade (nizkp.ts generateProof/verifyProof) so binary codec remains on-path."
-      // Since nizkp.ts hardcodes 18, we just use it and rely on its threshold (18).
-      proofBytes = await generateProof(input.age);
-      prove_ms = performance.now() - proveStart;
-
-      // 3. Age-Gate Verify
-      const verifyStart = performance.now();
-      ageGateOk = await verifyProof(proofBytes);
-      verify_ms = performance.now() - verifyStart;
-    } catch (err: any) {
-      prove_ms = performance.now() - proveStart;
-      ageGateOk = false;
-      errorMsg = err.message || 'Age-Gate proof generation failed';
-    }
-  } catch (err: any) {
-    errorMsg = err.message || 'E2E flow failed';
-  }
-
-  const total_ms = performance.now() - totalT0;
-
+function failure(
+  totalT0: number,
+  timings: E2EAgeGateResult['timings'],
+  error: string,
+  payload?: any
+): E2EAgeGateResult {
   return {
-    dualKeyOk,
-    ageGateOk,
-    proofBytes,
-    proofByteLength: proofBytes.byteLength,
-    timings: {
-      dualKey_ms,
-      server_dual_key_verify_ms,
-      prove_ms,
-      verify_ms,
-      total_ms,
-    },
-    error: errorMsg,
+    dualKeyOk: false,
+    ageGateOk: false,
+    proofBytes: new Uint8Array(0),
+    proofByteLength: 0,
+    timings: { ...timings, total_ms: performance.now() - totalT0 },
+    error,
     payload,
   };
+}
+
+export async function runDualKeyAgeGate(input: E2EAgeGateInput): Promise<E2EAgeGateResult> {
+  const totalT0 = performance.now();
+  const threshold = input.threshold ?? AGE_GATE_POLICY_THRESHOLD;
+  const timings: E2EAgeGateResult['timings'] = {
+    dualKey_ms: 0,
+    prove_ms: 0,
+    verify_ms: 0,
+    total_ms: 0,
+  };
+
+  if (threshold !== AGE_GATE_POLICY_THRESHOLD) {
+    return failure(
+      totalT0,
+      timings,
+      `Threshold ${threshold} is not the policy threshold ${AGE_GATE_POLICY_THRESHOLD}`
+    );
+  }
+
+  let proofBytes = new Uint8Array(0);
+  const proveStart = performance.now();
+  try {
+    proofBytes = await generateProof(input.age, AGE_GATE_POLICY_THRESHOLD);
+    timings.prove_ms = performance.now() - proveStart;
+  } catch (err: any) {
+    timings.prove_ms = performance.now() - proveStart;
+    return failure(totalT0, timings, err.message || 'Age-gate proof generation failed');
+  }
+
+  try {
+    const dkStart = performance.now();
+    const dkResult = await performDualKeyHandshake('inst-sandbox', 'user-factor-123', {
+      proofBytes,
+    });
+    timings.dualKey_ms = performance.now() - dkStart;
+    timings.server_dual_key_verify_ms = dkResult.serverVerifyMs;
+    timings.verify_ms = dkResult.serverVerifyMs ?? 0;
+
+    if (!dkResult.success) {
+      return failure(
+        totalT0,
+        timings,
+        dkResult.error || 'Clearance rejected by the institutional node',
+        dkResult.payload
+      );
+    }
+
+    return {
+      dualKeyOk: true,
+      ageGateOk: true,
+      proofBytes,
+      proofByteLength: proofBytes.byteLength,
+      timings: { ...timings, total_ms: performance.now() - totalT0 },
+      payload: dkResult.payload,
+    };
+  } catch (err: any) {
+    return failure(totalT0, timings, err.message || 'E2E flow failed');
+  }
 }

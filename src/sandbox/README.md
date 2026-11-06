@@ -4,9 +4,9 @@
 
 ## What Runs (Real Path)
 - **ECDSA P-256 Dual-Key:** Real cryptographic validation (`useBilanxDualKeyValidation.real` + server challenge/verify).
-- **Pedersen + B2 8-bit Range Proof:** Functional cryptographic implementation (`lib/crypto/*`, facade `nizkp.ts`).
-- **E2E Orchestration:** Driven by `runDualKeyAgeGate` (Dual-Key hard gate → prove/verify).
-- **Primary UI (`UnifiedLabDemo`):** POS ticket, live `dkProducts`/`dkWallets` resolution, policy banner (non-crypto), with compliance rebate applied **only** on crypto `APPROVED`.
+- **Pedersen + B2 8-bit Range Proof:** Functional cryptographic implementation in `src/lib/crypto/zkp/`.
+- **E2E Orchestration:** `runDualKeyAgeGate` builds the proof, then one handshake. The server is the authority for threshold 18.
+- **Primary UI (`SwissUnifiedPoCDemo`):** POS ticket, live `dkProducts`/`dkWallets` resolution, policy banner, with compliance rebate applied only after the server clearance returns `valid: true`.
 - **Harnesses:** B2 T1–T9, E2E, F4 metrics campaign.
 - **Proof Size:** 1355 bytes (when age ≥ 18 on facade threshold 18).
 
@@ -16,7 +16,7 @@
 - **Directives:** (documentation mode).
 
 ## What is Mock / Out of Scope
-- **Advanced Batch Tab:** This is purely a UI load mock. It is **not** a real E2E loop. Real E2E stress testing happens in `UnifiedLabDemo` (N≤30).
+- **Advanced Batch Tab:** This is purely a UI load mock. It is **not** a real E2E loop. Real E2E stress testing happens in `SwissUnifiedPoCDemo`.
 - **Target Integrations:** Full eIDAS-Node, EUDI Wallet, and OpenID4VP are target architectural endpoints, but are **not** embedded in this runtime.
 - **SAML Engine:** `saml_engine` is a reference/separate track and not part of the core age-gate path.
 - **Hardware/ERP:** RFID hardware and live ERP inventory sync are out of scope.
@@ -29,13 +29,12 @@ In this Node.js / pure JS lab environment, prove and verify operations take hund
 ## Folder Map
 ```text
 src/sandbox/
-  UnifiedLabDemo.tsx          # primary real-path POS lab UI
+  SwissUnifiedPoCDemo.tsx     # primary real-path POS lab UI
+  demo/                       # Pilot, protocol, and trust panes
   BilanxStressTest.tsx        # Advanced shell
   SandboxCryptoComparison.tsx # Key-1 mock vs real
   SandboxDossier.tsx          # Dossier renderer
-  lib/crypto/                 # B2/Pedersen primitives
   lib/e2e/                    # runDualKeyAgeGate orchestration
-  lib/nizkp.ts                # Facade
   hooks/                      # Lab React hooks
   mocks/                      # Mocks (e.g., for Advanced batch)
   tests/                      # Test harnesses (T1-T9, F4)

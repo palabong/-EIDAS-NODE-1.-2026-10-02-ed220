@@ -106,7 +106,7 @@ async function runTests() {
         r4.proofBytes[0] ^= 0xFF;
       }
       
-      const { verifyProof } = await import('../src/sandbox/lib/nizkp.ts');
+      const { verifyProof } = await import('../src/lib/crypto/zkp/nizkp.ts');
       const tamperedVerify = await verifyProof(r4.proofBytes);
       assertEqual(false, tamperedVerify, "E4 verify after tamper should be false");
       

@@ -104,18 +104,18 @@ export async function generateDkSvsTechnicalPositionPaperPdf(): Promise<void> {
   doc.setFont('Helvetica', 'normal');
   doc.setFontSize(8.5);
   doc.setTextColor(100, 116, 139);
-  doc.text('Version 2.5 Implementation-Accurate | Published: 20 July 2026 | TRL 6 Operational Pilot', margin, currentY);
+  doc.text('Version 2.5 Implementation-Accurate | Published: 20 July 2026 | Lab clearance sandbox', margin, currentY);
   currentY += 10;
 
   // Sections
   addHeading('1. EXECUTIVE SUMMARY', 1);
   addText(
-    'The Dual-Key Sovereign Validation System (DK-SVS) is an architectural model for privacy-preserving regulatory enforcement at the retail edge. As of July 2026, the Project Bilanx DK-SVS sandbox has achieved Technology Readiness Level (TRL) 6 with operational pilot validation across Swiss and Italian jurisdictions.',
+    'The Dual-Key Sovereign Validation System (DK-SVS) is a lab model for privacy-preserving regulatory enforcement at the retail edge. The sandbox exercises one server clearance over a P-256 user signature and a 1,355-byte range proof. It does not claim an operational pilot readiness level.',
     10,
     'normal'
   );
   addText(
-    'The current environment demonstrates a functional, dual-key cryptographic path where both keys undergo explicit server-side verification: (1) Key 1 Institutional Binding validated via ECDSA P-256 over a strict payload structure; and (2) Key 2 Age-Gate validated via Non-Interactive Zero-Knowledge Proofs (NIZKP) using Pedersen commitments and an 8-bit range proof (B2).',
+    'One handler serves POST /api/v1/dual-key/verify and POST /api/v1/age-gate/verify. The user signs challengeId:secondFactorHash:proofSha256Hex. The server accepts the Pedersen B2 proof only when its threshold byte is 18.',
     10,
     'normal'
   );
@@ -135,14 +135,14 @@ export async function generateDkSvsTechnicalPositionPaperPdf(): Promise<void> {
   addHeading('3. SYSTEM OVERVIEW — DUAL-KEY MODEL', 1);
   addHeading('3.1 Key 1: Institutional Binding', 2);
   addText(
-    'Key 1 represents the user registered device or credential binding via ECDSA P-256 signature over a specific challenge. The client transmits a DualKeyPayload to POST /api/v1/dual-key/verify, strictly enforcing fail-closed sequence.',
+    'The user key signs the challenge, the second-factor string, and the SHA-256 digest of the proof bytes. The server checks that signature before it applies the age policy. A failed signature releases the nonce.',
     10,
     'normal'
   );
 
   addHeading('3.2 Key 2: Age-Gate NIZKP', 2);
   addText(
-    'Key 2 represents the specific semantic predicate (e.g. Over 18) using Pedersen commitments on NIST P-256 with NUMS generator H, generating a certified 1355-byte binary proof verified at POST /api/v1/age-gate/verify.',
+    'The age predicate is a 1,355-byte Pedersen range proof on NIST P-256. The same clearance body carries proofBase64. The HTTP policy threshold is 18. The math verifier still honors the threshold byte inside the proof.',
     10,
     'normal'
   );
@@ -235,7 +235,7 @@ export async function generateDkSvsTechnicalPositionPaperPdf(): Promise<void> {
 
     // Footer
     doc.line(margin, pageHeight - 15, pageWidth - margin, pageHeight - 15);
-    doc.text('CLASSIFICATION: CONFIDENTIAL // TRL 6 PILOT', margin, pageHeight - 10);
+    doc.text('CLASSIFICATION: LAB SANDBOX // NOT AN OPERATIONAL PILOT', margin, pageHeight - 10);
     doc.text(`Page ${i} of ${totalPages}`, pageWidth - margin - 18, pageHeight - 10);
   }
 

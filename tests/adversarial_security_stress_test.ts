@@ -22,13 +22,35 @@ import {
 import { 
   generateBitwiseRangeProof, 
   verifyBitwiseRangeProof 
-} from '../src/sandbox/lib/crypto/range_b2.ts';
+} from '../src/lib/crypto/zkp/range_b2.ts';
 import { 
   encodeBitwiseRangeProof, 
   decodeBitwiseRangeProof 
-} from '../src/sandbox/lib/crypto/range_b2_codec.ts';
+} from '../src/lib/crypto/zkp/range_b2_codec.ts';
 import { bytesToBase64, base64ToBytes, bytesToHex } from '../src/lib/crypto/encoding.ts';
+import { generateProof } from '../src/lib/crypto/zkp/nizkp.ts';
+import { clearanceMessage } from '../src/lib/crypto/clearanceMessage.ts';
 import { performDualKeyHandshake } from '../src/sandbox/hooks/useBilanxDualKeyValidation.real.ts';
+
+async function proofSha256Hex(proof: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', proof);
+  return bytesToHex(new Uint8Array(digest));
+}
+
+async function signClearance(
+  privateKey: CryptoKey,
+  challengeId: string,
+  factor: string,
+  proof: Uint8Array
+): Promise<string> {
+  const message = clearanceMessage(challengeId, factor, await proofSha256Hex(proof));
+  const sig = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: { name: 'SHA-256' } },
+    privateKey,
+    new TextEncoder().encode(message)
+  );
+  return Buffer.from(sig).toString('base64url');
+}
 
 interface TestSummary {
   vector: string;
@@ -140,12 +162,27 @@ async function runAdversarialTestSuite() {
     // Mutate threshold byte (offset 1) from 16 to 18
     const tamperedThresholdBytes = new Uint8Array(serializedT16);
     tamperedThresholdBytes[1] = 18; // Attacker pretends proof is for T=18
-    
-    // Send to backend /api/v1/age-gate/verify
+
+    const forgeKey = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const forgeJwk = await crypto.subtle.exportKey('jwk', forgeKey.publicKey);
+    const forgeChallengeRes = await fetch(`${baseUrl}/api/institutional-challenge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
+    });
+    const forgeChallenge = await forgeChallengeRes.json();
+    const forgeSig = await signClearance(forgeKey.privateKey, forgeChallenge.challenge, 'HE-P256-FORGE', tamperedThresholdBytes);
     const verifyForgeRes = await fetch(`${baseUrl}/api/v1/age-gate/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ proofBase64: bytesToBase64(tamperedThresholdBytes) })
+      body: JSON.stringify({
+        v: 1,
+        challengeId: forgeChallenge.challenge,
+        secondFactorHash: 'HE-P256-FORGE',
+        userPublicKey: forgeJwk,
+        userSignature: forgeSig,
+        proofBase64: bytesToBase64(tamperedThresholdBytes)
+      })
     });
     const verifyForgeData = await verifyForgeRes.json();
     record(
@@ -192,18 +229,13 @@ async function runAdversarialTestSuite() {
 
     // Generate local user keypair and sign authentic second factor
     const authenticFp = 'HE-P256-AUTHENTIC-FINGERPRINT';
+    const policyProof = await generateProof(32, 18);
     const userKeyPair = await crypto.subtle.generateKey(
       { name: 'ECDSA', namedCurve: 'P-256' },
       true,
       ['sign', 'verify']
     );
-    const canonicalMessage = `${challengeStr}:${authenticFp}`;
-    const userSignatureBuffer = await crypto.subtle.sign(
-      { name: 'ECDSA', hash: { name: 'SHA-256' } },
-      userKeyPair.privateKey,
-      new TextEncoder().encode(canonicalMessage)
-    );
-    const userSigB64 = Buffer.from(userSignatureBuffer).toString('base64url');
+    const userSigB64 = await signClearance(userKeyPair.privateKey, challengeStr, authenticFp, policyProof);
     const userPublicKeyJwk = await crypto.subtle.exportKey('jwk', userKeyPair.publicKey);
 
     // MitM Attack: Attacker substitutes secondFactorHash with tampered value
@@ -216,6 +248,7 @@ async function runAdversarialTestSuite() {
         secondFactorHash: 'HE-P256-MALICIOUS-INJECTED-FP',
         userPublicKey: userPublicKeyJwk,
         userSignature: userSigB64,
+        proofBase64: bytesToBase64(policyProof),
         institutionalSignature: instChallengeData.signatureBase64
       })
     });
@@ -238,13 +271,7 @@ async function runAdversarialTestSuite() {
     const instChallengeData23 = await instChallengeRes23.json();
     const challengeStr23 = instChallengeData23.challenge;
 
-    const canonicalMessage23 = `${challengeStr23}:${authenticFp}`;
-    const userSignatureBuffer23 = await crypto.subtle.sign(
-      { name: 'ECDSA', hash: { name: 'SHA-256' } },
-      userKeyPair.privateKey,
-      new TextEncoder().encode(canonicalMessage23)
-    );
-    const userSigB6423 = Buffer.from(userSignatureBuffer23).toString('base64url');
+    const userSigB6423 = await signClearance(userKeyPair.privateKey, challengeStr23, authenticFp, policyProof);
 
     const singleBitFlippedFp = authenticFp.slice(0, -1) + (authenticFp.endsWith('A') ? 'B' : 'A');
     const bitFlipRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
@@ -256,6 +283,7 @@ async function runAdversarialTestSuite() {
         secondFactorHash: singleBitFlippedFp,
         userPublicKey: userPublicKeyJwk,
         userSignature: userSigB6423,
+        proofBase64: bytesToBase64(policyProof),
         institutionalSignature: instChallengeData23.signatureBase64
       })
     });
@@ -278,7 +306,8 @@ async function runAdversarialTestSuite() {
         challengeId: 'dummy-challenge-id',
         secondFactorHash: '',
         userPublicKey: userPublicKeyJwk,
-        userSignature: userSigB64
+        userSignature: userSigB64,
+        proofBase64: bytesToBase64(policyProof)
       })
     });
     record(
@@ -299,13 +328,7 @@ async function runAdversarialTestSuite() {
     const instChallengeData25 = await instChallengeRes25.json();
     const challengeStr25 = instChallengeData25.challenge;
 
-    const canonicalMessage25 = `${challengeStr25}:${authenticFp}`;
-    const userSignatureBuffer25 = await crypto.subtle.sign(
-      { name: 'ECDSA', hash: { name: 'SHA-256' } },
-      userKeyPair.privateKey,
-      new TextEncoder().encode(canonicalMessage25)
-    );
-    const userSigB6425 = Buffer.from(userSignatureBuffer25).toString('base64url');
+    const userSigB6425 = await signClearance(userKeyPair.privateKey, challengeStr25, authenticFp, policyProof);
 
     const concurrentPayload = {
       v: 1,
@@ -313,6 +336,7 @@ async function runAdversarialTestSuite() {
       secondFactorHash: authenticFp,
       userPublicKey: userPublicKeyJwk,
       userSignature: userSigB6425,
+      proofBase64: bytesToBase64(policyProof),
       institutionalSignature: instChallengeData25.signatureBase64
     };
 
@@ -452,28 +476,69 @@ async function runAdversarialTestSuite() {
       validProofBytes.length === 1355
     );
 
-    // 4.1 Truncated Proofs (length 0, length 3, length 1354)
-    const truncatedLengths = [0, 3, 100, 1354];
-    let allTruncatedRejected = true;
-    for (const len of truncatedLengths) {
-      const truncated = validProofBytes.slice(0, len);
+    async function postSignedClearance(proof: Uint8Array, signatureOverride?: string) {
+      const issued = await fetch(`${baseUrl}/api/institutional-challenge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
+      }).then(r => r.json());
+      const signature = signatureOverride ?? await signClearance(
+        userKeyPair.privateKey,
+        issued.challenge,
+        authenticFp,
+        proof
+      );
       const res = await fetch(`${baseUrl}/api/v1/age-gate/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ proofBase64: bytesToBase64(truncated) })
+        body: JSON.stringify({
+          v: 1,
+          challengeId: issued.challenge,
+          secondFactorHash: authenticFp,
+          userPublicKey: userPublicKeyJwk,
+          userSignature: signature,
+          proofBase64: bytesToBase64(proof),
+          institutionalSignature: issued.signatureBase64
+        })
       });
-      const data = await res.json();
-      if (res.status === 200 && data.valid === true) {
-        allTruncatedRejected = false;
-        break;
+      return { res, data: await res.json(), challenge: issued.challenge as string };
+    }
+
+    // 4.1 Truncated Proofs (length 0, length 3, length 1354)
+    const truncatedLengths = [0, 3, 100, 1354];
+    const truncatedNotes: string[] = [];
+    let allTruncatedRejected = true;
+    for (const len of truncatedLengths) {
+      const truncated = validProofBytes.slice(0, len);
+      if (len === 0) {
+        const emptyRes = await fetch(`${baseUrl}/api/v1/age-gate/verify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            v: 1,
+            challengeId: 'unused-empty-proof',
+            secondFactorHash: authenticFp,
+            userPublicKey: userPublicKeyJwk,
+            userSignature: 'AAAA',
+            institutionalSignature: 'AAAA'
+          })
+        });
+        const emptyData = await emptyRes.json();
+        truncatedNotes.push(`0:${emptyRes.status}`);
+        if (emptyRes.status !== 400 || emptyData.valid !== false) allTruncatedRejected = false;
+        continue;
       }
+      const { res, data } = await postSignedClearance(truncated);
+      truncatedNotes.push(`${len}:${res.status}:${data.reason || data.error}`);
+      const codecRejected = data.valid === false && String(data.reason || '').includes('1355');
+      if (!codecRejected) allTruncatedRejected = false;
     }
     record(
       'Vector 4',
       'V4.1',
       'Truncated Binary Proofs (lengths 0, 3, 100, 1354)',
-      'Rejected as invalid',
-      allTruncatedRejected ? 'All 4 truncated proofs rejected' : 'Accepted invalid length',
+      'Empty proof is HTTP 400; other lengths fail the 1355-byte codec',
+      truncatedNotes.join(' | '),
       allTruncatedRejected
     );
 
@@ -481,172 +546,167 @@ async function runAdversarialTestSuite() {
     const oversized = new Uint8Array(1356);
     oversized.set(validProofBytes);
     oversized[1355] = 0xAA;
-    const oversizedRes = await fetch(`${baseUrl}/api/v1/age-gate/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ proofBase64: bytesToBase64(oversized) })
-    });
-    const oversizedData = await oversizedRes.json();
+    const oversizedPosted = await postSignedClearance(oversized);
     record(
       'Vector 4',
       'V4.2',
       'Oversized Proof (1356 bytes with trailing byte)',
-      'valid=false',
-      `valid=${oversizedData.valid}`,
-      oversizedData.valid === false
+      'valid=false, codec length rejection',
+      `valid=${oversizedPosted.data.valid}, reason="${oversizedPosted.data.reason}"`,
+      oversizedPosted.data.valid === false && String(oversizedPosted.data.reason || '').includes('1355')
     );
 
     // 4.3 Version Byte Corruption (byte 0)
     const badVersion = new Uint8Array(validProofBytes);
-    badVersion[0] = 2; // Version 2 unsupported
-    const badVersionRes = await fetch(`${baseUrl}/api/v1/age-gate/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ proofBase64: bytesToBase64(badVersion) })
-    });
-    const badVersionData = await badVersionRes.json();
+    badVersion[0] = 2;
+    const badVersionPosted = await postSignedClearance(badVersion);
     record(
       'Vector 4',
       'V4.3',
       'Unsupported Proof Version (byte 0 = 2)',
-      'valid=false',
-      `valid=${badVersionData.valid}`,
-      badVersionData.valid === false
+      'valid=false, unsupported version',
+      `valid=${badVersionPosted.data.valid}, reason="${badVersionPosted.data.reason}"`,
+      badVersionPosted.data.valid === false && String(badVersionPosted.data.reason || '').includes('Unsupported proof version')
     );
 
     // 4.4 Bit Commitment Corruption (tampering byte in C_0)
     const badBitCommitment = new Uint8Array(validProofBytes);
-    badBitCommitment[36] ^= 0xFF; // Flip byte in C_0
-    const badBitRes = await fetch(`${baseUrl}/api/v1/age-gate/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ proofBase64: bytesToBase64(badBitCommitment) })
-    });
-    const badBitData = await badBitRes.json();
+    badBitCommitment[36] ^= 0xFF;
+    const badBitPosted = await postSignedClearance(badBitCommitment);
     record(
       'Vector 4',
       'V4.4',
       'Bit Commitment Tampering (C_0 byte corruption)',
-      'valid=false',
-      `valid=${badBitData.valid}`,
-      badBitData.valid === false
+      'valid=false, Verification failed',
+      `valid=${badBitPosted.data.valid}, reason="${badBitPosted.data.reason}"`,
+      badBitPosted.data.valid === false && badBitPosted.data.reason === 'Verification failed'
     );
 
     // 4.5 Schnorr Response Tampering (s_0 byte in bit 0)
     const badSchnorr = new Uint8Array(validProofBytes);
-    badSchnorr[100] ^= 0x42; // Flip byte in s_0
-    const badSchnorrRes = await fetch(`${baseUrl}/api/v1/age-gate/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ proofBase64: bytesToBase64(badSchnorr) })
-    });
-    const badSchnorrData = await badSchnorrRes.json();
+    badSchnorr[100] ^= 0x42;
+    const badSchnorrPosted = await postSignedClearance(badSchnorr);
     record(
       'Vector 4',
       'V4.5',
       'Schnorr Response Tampering (s_0 scalar mutation)',
-      'valid=false',
-      `valid=${badSchnorrData.valid}`,
-      badSchnorrData.valid === false
+      'valid=false, Verification failed',
+      `valid=${badSchnorrPosted.data.valid}, reason="${badSchnorrPosted.data.reason}"`,
+      badSchnorrPosted.data.valid === false && badSchnorrPosted.data.reason === 'Verification failed'
     );
 
     // 4.6 Scalar Blinding Factor r_diff Tampering (last 32 bytes)
     const badRDiff = new Uint8Array(validProofBytes);
-    badRDiff[1340] ^= 0x77; // Corrupt r_diff
-    const badRDiffRes = await fetch(`${baseUrl}/api/v1/age-gate/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ proofBase64: bytesToBase64(badRDiff) })
-    });
-    const badRDiffData = await badRDiffRes.json();
+    badRDiff[1340] ^= 0x77;
+    const badRDiffPosted = await postSignedClearance(badRDiff);
     record(
       'Vector 4',
       'V4.6',
       'Sum-Check Scalar Tampering (r_diff corruption)',
-      'valid=false',
-      `valid=${badRDiffData.valid}`,
-      badRDiffData.valid === false
+      'valid=false, Verification failed',
+      `valid=${badRDiffPosted.data.valid}, reason="${badRDiffPosted.data.reason}"`,
+      badRDiffPosted.data.valid === false && badRDiffPosted.data.reason === 'Verification failed'
     );
 
-    // 4.7 Dual-Key Signature Byte Tampering
-    // Fresh handshake challenge
-    const instFreshRes = await fetch(`${baseUrl}/api/institutional-challenge`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
-    });
-    const instFreshData = await instFreshRes.json();
-    const freshChallenge = instFreshData.challenge;
-
-    const freshMsg = `${freshChallenge}:${authenticFp}`;
-    const freshSig = await crypto.subtle.sign(
-      { name: 'ECDSA', hash: { name: 'SHA-256' } },
-      userKeyPair.privateKey,
-      new TextEncoder().encode(freshMsg)
-    );
-    const freshSigB64 = Buffer.from(freshSig).toString('base64url');
-    // Tamper signature by changing last characters
-    const tamperedSigB64 = freshSigB64.slice(0, -4) + 'AAAA';
-
-    const tamperedSigRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        v: 1,
-        challengeId: freshChallenge,
-        secondFactorHash: authenticFp,
-        userPublicKey: userPublicKeyJwk,
-        userSignature: tamperedSigB64,
-        institutionalSignature: instFreshData.signatureBase64
-      })
-    });
-    const tamperedSigData = await tamperedSigRes.json();
+    // 4.7 Dual-Key Signature Byte Tampering over a bound proof
+    const honestSig = await signClearance(userKeyPair.privateKey, 'placeholder', authenticFp, validProofBytes);
+    const tamperedSigB64 = honestSig.slice(0, -4) + 'AAAA';
+    const tamperedPosted = await postSignedClearance(validProofBytes, tamperedSigB64);
     record(
       'Vector 4',
       'V4.7',
       'Tampered User ECDSA Signature in Dual-Key Handshake',
       'valid=false, reason="Signature verification failed"',
-      `valid=${tamperedSigData.valid}, reason="${tamperedSigData.reason}"`,
-      tamperedSigData.valid === false && tamperedSigData.reason === 'Signature verification failed'
+      `valid=${tamperedPosted.data.valid}, reason="${tamperedPosted.data.reason}"`,
+      tamperedPosted.data.valid === false && tamperedPosted.data.reason === 'Signature verification failed'
     );
 
-    // 4.8 Tampered Institutional Signature
-    const instFreshRes48 = await fetch(`${baseUrl}/api/institutional-challenge`, {
+    // 4.8 Missing proof is rejected before the nonce is touched.
+    const missingProofIssued = await fetch(`${baseUrl}/api/institutional-challenge`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
-    });
-    const instFreshData48 = await instFreshRes48.json();
-    const freshChallenge48 = instFreshData48.challenge;
-
-    const freshMsg48 = `${freshChallenge48}:${authenticFp}`;
-    const freshSig48 = await crypto.subtle.sign(
-      { name: 'ECDSA', hash: { name: 'SHA-256' } },
-      userKeyPair.privateKey,
-      new TextEncoder().encode(freshMsg48)
-    );
-    const freshSigB6448 = Buffer.from(freshSig48).toString('base64url');
-
-    const tamperedInstSigRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
+    }).then(r => r.json());
+    const missingProofRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         v: 1,
-        challengeId: freshChallenge48,
+        challengeId: missingProofIssued.challenge,
         secondFactorHash: authenticFp,
         userPublicKey: userPublicKeyJwk,
-        userSignature: freshSigB6448,
-        institutionalSignature: 'MEYCIQDaTamperedInstSignatureFakeBytes1234567890=='
+        userSignature: tamperedSigB64,
+        institutionalSignature: missingProofIssued.signatureBase64
       })
     });
-    const tamperedInstSigData = await tamperedInstSigRes.json();
+    const missingProofData = await missingProofRes.json();
     record(
       'Vector 4',
       'V4.8',
-      'Tampered Institutional Signature in Dual-Key Handshake',
-      'valid=false, reason="Institutional signature verification failed on server"',
-      `valid=${tamperedInstSigData.valid}, reason="${tamperedInstSigData.reason}"`,
-      tamperedInstSigData.valid === false && tamperedInstSigData.reason.includes('Institutional signature verification failed')
+      'Clearance without an age proof',
+      'HTTP 400, valid=false, missing fields',
+      `HTTP ${missingProofRes.status}, valid=${missingProofData.valid}, error="${missingProofData.error}"`,
+      missingProofRes.status === 400 && missingProofData.valid === false && String(missingProofData.error || '').includes('Missing')
+    );
+
+    // 4.9 Prover-chosen threshold is not policy.
+    const underThresholdProof = await generateProof(5, 0);
+    const underThresholdPosted = await postSignedClearance(underThresholdProof);
+    record(
+      'Vector 4',
+      'V4.9',
+      'Proof threshold 0 rejected by server policy 18',
+      'valid=false, Threshold 0 is not the policy threshold 18',
+      `valid=${underThresholdPosted.data.valid}, reason="${underThresholdPosted.data.reason}"`,
+      underThresholdPosted.data.valid === false &&
+      underThresholdPosted.data.reason === 'Threshold 0 is not the policy threshold 18'
+    );
+
+    // 4.10 A bad signature releases the nonce. A later valid signature still clears.
+    const retryIssued = await fetch(`${baseUrl}/api/institutional-challenge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
+    }).then(r => r.json());
+    const retryProof = validProofBytes;
+    const retryGoodSig = await signClearance(userKeyPair.privateKey, retryIssued.challenge, authenticFp, retryProof);
+    const retryBadRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        v: 1,
+        challengeId: retryIssued.challenge,
+        secondFactorHash: authenticFp,
+        userPublicKey: userPublicKeyJwk,
+        userSignature: tamperedSigB64,
+        proofBase64: bytesToBase64(retryProof),
+        institutionalSignature: retryIssued.signatureBase64
+      })
+    });
+    const retryBadData = await retryBadRes.json();
+    const retryGoodRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        v: 1,
+        challengeId: retryIssued.challenge,
+        secondFactorHash: authenticFp,
+        userPublicKey: userPublicKeyJwk,
+        userSignature: retryGoodSig,
+        proofBase64: bytesToBase64(retryProof),
+        institutionalSignature: retryIssued.signatureBase64
+      })
+    });
+    const retryGoodData = await retryGoodRes.json();
+    record(
+      'Vector 4',
+      'V4.10',
+      'Bad signature does not consume the nonce',
+      'first valid=false Signature verification failed; retry valid=true',
+      `first="${retryBadData.reason}", retry valid=${retryGoodData.valid} reason="${retryGoodData.reason || ''}"`,
+      retryBadData.valid === false &&
+      retryBadData.reason === 'Signature verification failed' &&
+      retryGoodData.valid === true
     );
 
     // =========================================================================
@@ -720,15 +780,22 @@ async function runAdversarialTestSuite() {
       piiBytes === 0 && liability === 'ZERO_LIABILITY'
     );
 
-    // 5.5 Quarantine client status validation
+    // 5.5 Outbound HTTP bodies carry neither the preset name nor the date of birth.
+    const outboundWire = [...swissAdult.outboundBodies, ...euAdult.outboundBodies].join('\n');
+    const leakedWireTerms = [
+      swissAdult.citizen.fullName,
+      swissAdult.citizen.dateOfBirth,
+      euAdult.citizen.fullName,
+      euAdult.citizen.dateOfBirth
+    ].filter(term => outboundWire.includes(term));
     record(
       'Vector 5',
       'V5.5',
-      'Client-Side Sovereign Quarantine Isolation Marker',
-      'status=QUARANTINED_CLIENT_ONLY, serverLeakageBytes=0',
-      `status=${swissAdult.quarantinedPii.status}, serverLeakageBytes=${swissAdult.quarantinedPii.serverLeakageBytes}`,
+      'Outbound HTTP bodies omit preset name and date of birth',
+      'status=QUARANTINED_CLIENT_ONLY, 0 name or birth-date terms on the wire',
+      `status=${swissAdult.quarantinedPii.status}, leaked=${leakedWireTerms.join(', ') || 'NONE'}`,
       swissAdult.quarantinedPii.status === 'QUARANTINED_CLIENT_ONLY' &&
-      swissAdult.quarantinedPii.serverLeakageBytes === 0
+      leakedWireTerms.length === 0
     );
 
     console.log('\n================================================================================');

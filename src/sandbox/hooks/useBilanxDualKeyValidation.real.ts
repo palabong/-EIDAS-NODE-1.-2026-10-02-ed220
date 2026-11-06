@@ -1,7 +1,9 @@
 import { useState, useCallback, useEffect } from 'react';
 import { KpiTelemetry } from '../../lib/KpiTelemetry';
 import { useDualKeyResult } from '../context/DualKeyResultContext';
-import { bufferToHex, base64ToBuffer, bufferToBase64Url } from '../../lib/crypto/encoding';
+import { bufferToHex, base64ToBuffer, bufferToBase64Url, bytesToBase64 } from '../../lib/crypto/encoding';
+import { clearanceMessage } from '../../lib/crypto/clearanceMessage';
+import { generateProof } from '../../lib/crypto/zkp/nizkp';
 
 export type HandshakeState = 
   | 'IDLE' 
@@ -17,7 +19,8 @@ export interface DualKeyPayload {
   secondFactorHash: string;          // hex lowercase SHA-256
   userPublicKey: JsonWebKey;         // EC P-256, x + y only (no d)
   userSignature: string;             // base64url, no padding
-  institutionalSignature?: string;   // base64 institutional signature over challengeId
+  institutionalSignature?: string;   // base64 institutional signature over challengeId; not an acceptance input
+  proofBase64?: string;              // 1,355-byte range proof, required for server clearance
   clientTs?: string;                 // optional, NOT part of signed message
 }
 
@@ -192,9 +195,10 @@ async function deleteKeyPair(id: string): Promise<boolean> {
 export async function performDualKeyHandshake(
   institutionId: string,
   secondFactorId: string,
-  options?: { fetchFn?: typeof fetch; baseUrl?: string } | typeof fetch
+  options?: { fetchFn?: typeof fetch; baseUrl?: string; proofBytes?: Uint8Array } | typeof fetch
 ): Promise<DualKeyValidationResult & { coreCryptoTime: number }> {
   const localFetch = typeof options === 'function' ? options : (options?.fetchFn || fetch);
+  const proofBytes = typeof options === 'object' ? options?.proofBytes : undefined;
   const baseUrl = (typeof options === 'object' && options?.baseUrl) || (typeof window !== 'undefined' && window.location ? window.location.origin : '');
   const resolveUrl = (path: string) => baseUrl ? `${baseUrl.replace(/\/$/, '')}${path}` : path;
 
@@ -293,8 +297,18 @@ export async function performDualKeyHandshake(
     const secondFactorHashBuffer = await crypto.subtle.digest('SHA-256', secondFactorBuffer);
     coreCryptoTime += performance.now() - t0;
     const secondFactorHashHex = bufferToHex(secondFactorHashBuffer);
-    
-    const boundPayloadStr = `${challengeStr}:${secondFactorHashHex}`;
+
+    let proofSha256Hex = '';
+    let proofBase64: string | undefined;
+    if (proofBytes && proofBytes.byteLength > 0) {
+      const proofDigest = await crypto.subtle.digest('SHA-256', proofBytes);
+      proofSha256Hex = bufferToHex(proofDigest);
+      proofBase64 = bytesToBase64(proofBytes);
+    }
+
+    const boundPayloadStr = proofSha256Hex
+      ? clearanceMessage(challengeStr, secondFactorHashHex, proofSha256Hex)
+      : `${challengeStr}:${secondFactorHashHex}`;
     const boundPayloadBuffer = new TextEncoder().encode(boundPayloadStr);
     
     logs.push('User: Signing the strongly bound payload...');
@@ -339,8 +353,26 @@ export async function performDualKeyHandshake(
         userPublicKey: publicJwk,
         userSignature: bufferToBase64Url(userSignatureBuffer),
         institutionalSignature: challengeData.signatureBase64,
+        proofBase64,
         clientTs: new Date().toISOString()
       };
+
+      if (!proofBase64) {
+        logs.push('Verifier: Age proof missing. Local institutional check passed. Clearance was not submitted.');
+        const endTime = performance.now();
+        return {
+          success: false,
+          state: 'FAILED',
+          latencyMs: Math.round(endTime - startTime),
+          institutionalSignatureValid: true,
+          userSignatureValid: false,
+          bindingValid: false,
+          payload,
+          error: 'Clearance requires an age proof bound to the challenge.',
+          logs,
+          coreCryptoTime
+        };
+      }
 
       logs.push('Verifier: Sending payload to server for validation...');
       try {
@@ -464,7 +496,8 @@ export function useBilanxDualKeyValidationReal() {
     setState('INITIATING');
     setResult(null);
 
-    const result = await performDualKeyHandshake(params.institutionId, params.secondFactorId);
+    const proofBytes = await generateProof(18);
+    const result = await performDualKeyHandshake(params.institutionId, params.secondFactorId, { proofBytes });
     
     setState(result.state);
     setResult(result);

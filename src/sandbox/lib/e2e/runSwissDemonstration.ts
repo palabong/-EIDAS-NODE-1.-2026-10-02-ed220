@@ -1,6 +1,6 @@
 /**
  * Bilanx — Dual-Key Sovereign Validation System (DK-SVS)
- * TRL 6 Operational Pilot Sandbox E2E Pipeline Orchestrator
+ * Lab pilot pipeline. One server clearance, threshold 18. The citizen name stays off the HTTP body.
  * 
  * Supports Dual-Jurisdiction Policy Profiles:
  * 1. Swiss Profile (CH - FADP / Retail POS)
@@ -21,7 +21,7 @@
  * - Software platform enclave simulator (FIDO2 L2)
  */
 
-import { generateProof } from '../nizkp.ts';
+import { generateProof } from '../../../lib/crypto/zkp/nizkp.ts';
 import { performDualKeyHandshake } from '../../hooks/useBilanxDualKeyValidation.real.ts';
 import { 
   registerSimulatorEnclave, 
@@ -39,8 +39,7 @@ import {
 } from '../../../lib/crypto/ctap2Harness.ts';
 import { 
   bytesToHex, 
-  base64ToBytes, 
-  bytesToBase64 
+  base64ToBytes
 } from '../../../lib/crypto/encoding.ts';
 import { 
   getPilotProfile, 
@@ -144,7 +143,6 @@ export interface QuarantinedPiiData {
   userId: string;
   nationality: string;
   status: 'QUARANTINED_CLIENT_ONLY';
-  serverLeakageBytes: 0;
 }
 
 export interface BilanxValidationEnvelope {
@@ -218,6 +216,8 @@ export interface SwissDemonstrationResult {
   hwFingerprint: string;
   envelope?: BilanxValidationEnvelope;
   logs: StepLogEntry[];
+  /** HTTP bodies this run actually sent. */
+  outboundBodies: string[];
   error?: string;
 }
 
@@ -248,7 +248,21 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
 
   const baseUrl = options?.baseUrl || (typeof window !== 'undefined' && window.location ? window.location.origin : '');
   const resolveUrl = (path: string) => baseUrl ? `${baseUrl.replace(/\/$/, '')}${path}` : path;
-  const localFetch = options?.fetchFn || fetch;
+  const outboundBodies: string[] = [];
+  const callerFetch = options?.fetchFn || fetch;
+  const localFetch: typeof fetch = async (input, init) => {
+    const body = init?.body;
+    if (typeof body === 'string') outboundBodies.push(body);
+    else if (body == null) outboundBodies.push('');
+    else outboundBodies.push('[non-string body]');
+    return callerFetch(input, init);
+  };
+  const seal = (
+    partial: Omit<PilotDemonstrationResult, 'outboundBodies'>
+  ): PilotDemonstrationResult => ({
+    ...partial,
+    outboundBodies: outboundBodies.slice(),
+  });
   const tStart = performance.now();
   const logs: StepLogEntry[] = [];
   const institutionId = options?.institutionId || profile.institutionId;
@@ -286,7 +300,6 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
     userId: citizen.userId,
     nationality: citizen.nationality,
     status: 'QUARANTINED_CLIENT_ONLY',
-    serverLeakageBytes: 0
   };
 
   // -------------------------------------------------------------------------
@@ -308,7 +321,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       details: `[STOCK POLICY BLOCK: COUNTERFEIT DETECTED] Product "${rfidItem.productName}" (${rfidItem.hardwareUid}) flagged with revoked/invalid manufacturer signature (${rfidItem.signature}). Transaction outcome set to REJECTED_COUNTERFEIT. Excise recovery zeroed (€0.00). POS checkout blocked.`
     });
 
-    return {
+    return seal({
       success: false,
       validationStatus: 'REJECTED_COUNTERFEIT',
       currentStep: 0,
@@ -318,7 +331,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       hwFingerprint: '',
       logs,
       error: '[STOCK POLICY BLOCK: COUNTERFEIT DETECTED] Counterfeit physical product detected. Hardware UID revoked or invalid. POS checkout blocked.'
-    };
+    });
   }
 
   if (rfidItem.status === 'recalled') {
@@ -331,7 +344,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       details: `[STOCK POLICY BLOCK: RECALLED STOCK] Product "${rfidItem.productName}" (${rfidItem.hardwareUid}) flagged on institutional product safety recall list. Checkout halted by stock policy gate. Excise recovery zeroed (€0.00).`
     });
 
-    return {
+    return seal({
       success: false,
       validationStatus: 'REJECTED',
       currentStep: 0,
@@ -341,7 +354,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       hwFingerprint: '',
       logs,
       error: '[STOCK POLICY BLOCK: RECALLED STOCK] Recalled physical product detected. Checkout halted by stock policy gate.'
-    };
+    });
   }
 
   logs.push({
@@ -384,7 +397,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       timestamp: Date.now(),
       durationMs: Math.round(performance.now() - step1Start),
       status: 'PASS',
-      details: `Ingested ${citizen.nationality} credential under ${profile.regulatoryFramework}. Plaintext PII strictly quarantined client-side (0 bytes server leakage). Verified Age: ${citizen.age}, LoA: ${citizen.levelOfAssurance}.`
+      details: `Ingested ${citizen.nationality} credential under ${profile.regulatoryFramework}. Name and date of birth stay on the client profile. Verified Age: ${citizen.age}, LoA: ${citizen.levelOfAssurance}.`
     });
   } catch (err: any) {
     logs.push({
@@ -395,7 +408,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       status: 'FAIL',
       details: `Ingestion failed: ${err.message}`
     });
-    return {
+    return seal({
       success: false,
       validationStatus: 'REJECTED',
       currentStep: 1,
@@ -405,7 +418,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       hwFingerprint: '',
       logs,
       error: err.message
-    };
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -432,7 +445,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       const regResult = await ctap2Harness.registerWithServer({
         baseUrl,
         username: citizen.userId,
-        displayName: citizen.fullName,
+        displayName: citizen.userId,
         fetchFn: localFetch
       });
 
@@ -449,7 +462,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       // Real Browser WebAuthn Prompt (Touch ID / Face ID / Windows Hello)
       authenticatorAttachment = 'platform_biometrics';
       deviceName = 'Physical Platform Authenticator';
-      const regInfo = await registerHardwareEnclaveKey(citizen.userId, citizen.fullName, {
+      const regInfo = await registerHardwareEnclaveKey(citizen.userId, citizen.userId, {
         baseUrl,
         fetchFn: localFetch
       });
@@ -474,7 +487,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       }
       const simReg = await registerSimulatorEnclave({
         username: citizen.userId,
-        displayName: citizen.fullName,
+        displayName: citizen.userId,
         fetchFn: localFetch,
         origin: simOrigin,
         rpId: simRpId
@@ -506,7 +519,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       status: 'FAIL',
       details: `Hardware Enclave Attestation failed: ${err.message}`
     });
-    return {
+    return seal({
       success: false,
       validationStatus: 'REJECTED',
       currentStep: 2,
@@ -516,7 +529,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       hwFingerprint: '',
       logs,
       error: `Hardware attestation failure: ${err.message}`
-    };
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -539,7 +552,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
         details: `Hardware Fingerprint Tampering Detected: Presented second factor (${hwFingerprint}) does not match authenticated hardware enclave.`
       });
 
-      return {
+      return seal({
         success: false,
         validationStatus: 'REJECTED',
         currentStep: 3,
@@ -549,7 +562,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
         hwFingerprint,
         logs,
         error: 'Hardware Fingerprint Tampering: Second factor mismatch with enclave attestation.'
-      };
+      });
     }
 
     // 3B. Regulatory Policy Evaluation (Underage rejection + eIDAS LoA High mandate)
@@ -560,10 +573,10 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
         timestamp: Date.now(),
         durationMs: Math.round(performance.now() - step3Start),
         status: 'FAIL',
-        details: `Deterministic ZKP Rejection: Citizen age (${citizen.age}) < ${profile.minimumAge}. Sigma range proof cannot open under statutory threshold.`
+        details: `Policy pre-check: age ${citizen.age} is below ${profile.minimumAge}. No range proof was built.`
       });
 
-      return {
+      return seal({
         success: false,
         validationStatus: 'REJECTED',
         currentStep: 3,
@@ -573,7 +586,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
         hwFingerprint,
         logs,
         error: `Underage citizen: Age ${citizen.age} is below minimum threshold ${profile.minimumAge}.`
-      };
+      });
     }
 
     // Enforce eIDAS LoA High in Italian AgCom Profile
@@ -581,14 +594,14 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       const loaError = `Insufficient Level of Assurance: ${profile.name} strictly requires eIDAS Level of Assurance High under AgCom Resolution 9/24/CONS. Presented LoA: ${citizen.levelOfAssurance}.`;
       logs.push({
         step: 3,
-        title: `eIDAS Level of Assurance Verification (AgCom Delibera 9/24/CONS)`,
+        title: `Profile pre-check: eIDAS Level of Assurance (AgCom Delibera 9/24/CONS)`,
         timestamp: Date.now(),
         durationMs: Math.round(performance.now() - step3Start),
         status: 'FAIL',
         details: loaError
       });
 
-      return {
+      return seal({
         success: false,
         validationStatus: 'REJECTED',
         currentStep: 3,
@@ -598,33 +611,21 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
         hwFingerprint,
         logs,
         error: loaError
-      };
+      });
     }
 
-    // 3C. Dual-Key Handshake binding HW_FINGERPRINT to institutional node
-    dualKeyHandshakeResult = await performDualKeyHandshake(institutionId, hwFingerprint, {
-      fetchFn: localFetch,
-      baseUrl
-    });
-    if (!dualKeyHandshakeResult.success) {
-      throw new Error(dualKeyHandshakeResult.error || 'Dual-Key handshake verification failed on server');
-    }
-
-    // 3D. ZKP Age-Gate: Generate 1355-byte B2 range proof
+    // 3C. One clearance: proof is bound into the user signature and checked at policy threshold 18.
     zkpProofBytes = await generateProof(citizen.age);
     const zkpDigestBuffer = await crypto.subtle.digest('SHA-256', zkpProofBytes);
     zkpProofDigest = bytesToHex(zkpDigestBuffer).slice(0, 16);
 
-    // Verify proof on backend node
-    const verifyRes = await localFetch(resolveUrl('/api/v1/age-gate/verify'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ proofBase64: bytesToBase64(zkpProofBytes) })
+    dualKeyHandshakeResult = await performDualKeyHandshake(institutionId, hwFingerprint, {
+      fetchFn: localFetch,
+      baseUrl,
+      proofBytes: zkpProofBytes
     });
-
-    const verifyData = await verifyRes.json();
-    if (!verifyRes.ok || !verifyData.valid) {
-      throw new Error(verifyData.error || 'Zero-knowledge range proof rejected by institutional verifier');
+    if (!dualKeyHandshakeResult.success) {
+      throw new Error(dualKeyHandshakeResult.error || 'Clearance rejected by the institutional node');
     }
 
     logs.push({
@@ -644,7 +645,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       status: 'FAIL',
       details: `Verification failed: ${err.message}`
     });
-    return {
+    return seal({
       success: false,
       validationStatus: 'REJECTED',
       currentStep: 3,
@@ -654,7 +655,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       hwFingerprint,
       logs,
       error: err.message
-    };
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -749,7 +750,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
     details: `Issued ${envelopeId} under ${profile.auditDirective}. Citizen PII Transmitted: 0 Bytes. Execution Latency: ${totalTimeMs} ms (${totalTimeMs < profile.targetMaxLatencyMs ? 'Within POS Target < 1.5s' : 'Completed'}).`
   });
 
-  return {
+  return seal({
     success: true,
     validationStatus: 'APPROVED',
     currentStep: 4,
@@ -759,7 +760,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
     hwFingerprint,
     envelope,
     logs
-  };
+  });
 }
 
 /**

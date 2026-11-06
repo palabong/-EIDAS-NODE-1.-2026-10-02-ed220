@@ -52,7 +52,10 @@ import {
   ITALIAN_PILOT_PROFILE 
 } from '../src/sandbox/lib/pilotProfiles.ts';
 import { buildAuditCertificatePdfDoc } from '../src/sandbox/lib/PdfReceiptGenerator.ts';
-import { generateBitwiseRangeProof } from '../src/sandbox/lib/crypto/range_b2.ts';
+import { generateBitwiseRangeProof } from '../src/lib/crypto/zkp/range_b2.ts';
+import { generateProof } from '../src/lib/crypto/zkp/nizkp.ts';
+import { clearanceMessage } from '../src/lib/crypto/clearanceMessage.ts';
+import { bytesToBase64, bytesToHex } from '../src/lib/crypto/encoding.ts';
 import { DEFAULT_UHD_RFID_ASSERTIONS } from '../src/data.ts';
 
 async function createExpiredCertHelper(): Promise<{ der: Uint8Array; webCryptoKey: CryptoKey }> {
@@ -380,12 +383,14 @@ async function runPilotVerificationSuite() {
     const challengeStr = chalData.challenge;
 
     const fp = 'HE-P256-CONCURRENT-FP';
+    const policyProof = await generateProof(32, 18);
+    const proofDigest = await crypto.webcrypto.subtle.digest('SHA-256', policyProof);
     const userKeyPair = await crypto.webcrypto.subtle.generateKey(
       { name: 'ECDSA', namedCurve: 'P-256' },
       true,
       ['sign', 'verify']
     );
-    const msg = `${challengeStr}:${fp}`;
+    const msg = clearanceMessage(challengeStr, fp, bytesToHex(new Uint8Array(proofDigest)));
     const sigBuf = await crypto.webcrypto.subtle.sign(
       { name: 'ECDSA', hash: { name: 'SHA-256' } },
       userKeyPair.privateKey,
@@ -400,6 +405,7 @@ async function runPilotVerificationSuite() {
       secondFactorHash: fp,
       userPublicKey: pubJwk,
       userSignature: sigB64,
+      proofBase64: bytesToBase64(policyProof),
       institutionalSignature: chalData.signatureBase64
     };
 
@@ -471,7 +477,13 @@ async function runPilotVerificationSuite() {
     record(swissAdultResult.validationStatus === 'APPROVED', '2.1b Swiss adult received APPROVED status');
     record(swissAdultResult.currentStep === 4, '2.1c Pipeline completed all 4 steps');
     record(swissAdultResult.citizen.age === 32, '2.1d Citizen age verified as 32 (adult >= 18)');
-    record(swissAdultResult.quarantinedPii.serverLeakageBytes === 0, '2.1e Plaintext PII quarantined with 0 bytes server leakage');
+    const swissWire = swissAdultResult.outboundBodies.join('\n');
+    record(
+      swissAdultResult.quarantinedPii.status === 'QUARANTINED_CLIENT_ONLY' &&
+      !swissWire.includes(swissAdultResult.citizen.fullName) &&
+      !swissWire.includes(swissAdultResult.citizen.dateOfBirth),
+      '2.1e Outbound HTTP bodies omit the citizen name and date of birth'
+    );
     record(swissAdultResult.envelope !== undefined, '2.1f POS Validation Envelope generated');
     record(swissAdultResult.envelope?.verificationClaims.ageOver18 === true, '2.1g Verification claims ageOver18=true');
     record(swissAdultResult.envelope?.cryptographicReceipt.proofByteLength === 1355, '2.1h Certified canonical 1,355-byte NIST P-256 B2 Sigma range proof');

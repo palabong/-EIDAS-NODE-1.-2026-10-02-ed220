@@ -16,9 +16,7 @@ export function SandboxDossier() {
 ## 1. Executive Summary
 The Dual-Key Sovereign Validation System (DK-SVS) is an architectural model for privacy-preserving regulatory enforcement at the retail edge. As of July 2026, the Project Bilanx DK-SVS sandbox has achieved **Technology Readiness Level (TRL) 4 (lab validation)**. 
 
-The current environment demonstrates a functional, dual-key cryptographic path where both keys undergo explicit server-side verification:
-1. **Key 1 (Institutional Binding):** Validated via ECDSA P-256 over a strict payload structure.
-2. **Key 2 (Age-Gate NIZKP):** Validated via Non-Interactive Zero-Knowledge Proofs (NIZKP) using Pedersen commitments and an 8-bit range proof (B2).
+The current environment demonstrates one clearance. The user signs \`challengeId:secondFactorHash:proofSha256Hex\` with a P-256 key. The server checks that signature and accepts the 1,355-byte range proof only when its threshold byte is 18. \`POST /api/v1/dual-key/verify\` and \`POST /api/v1/age-gate/verify\` are the same handler.
 
 This document serves as an implementation-accurate representation of the current sandbox state. It explicitly supersedes previous versions that framed Key 1 as a local-only handshake and removes unevidenced performance or semantic claims.
 
@@ -37,13 +35,13 @@ The core of the system is the Dual-Key orchestrator. Both keys must be validated
 ### 3.1 Key 1: Institutional Binding
 Key 1 represents the user's registered device or credential binding.
 - **Mechanism:** ECDSA P-256 signature over a specific challenge.
-- **Validation Path:** The client transmits a \`DualKeyPayload\` to the server at \`POST /api/v1/dual-key/verify\`. The server performs real ECDSA P-256 verification.
-- **Orchestration Constraint:** The orchestrator enforces a **fail-closed rule**. If Key 1 server verification fails or the payload is tampered with, the flow terminates immediately. Key 2 (Age-Gate) is never generated.
+- **Validation Path:** The client transmits one clearance body to \`POST /api/v1/dual-key/verify\` (alias \`POST /api/v1/age-gate/verify\`). The server checks the user signature over the bound message.
+- **Orchestration Constraint:** The range proof is built before that POST. A rejected signature or proof fails the clearance, and the orchestrator discards the proof bytes. A bad signature does not consume the nonce.
 
 ### 3.2 Key 2: Age-Gate NIZKP
 Key 2 represents the specific semantic predicate (e.g., "Over 18").
 - **Mechanism:** A Non-Interactive Zero-Knowledge Proof (NIZKP). Uses Pedersen commitments on NIST P-256 with a NUMS (Nothing Up My Sleeve) generator H, performing a B2 8-bit bit-decomposition range proof.
-- **Validation Path:** The client generates a fixed 1355-byte binary proof. This is transmitted to the server at \`POST /api/v1/age-gate/verify\` for cryptographic verification.
+- **Validation Path:** The same clearance body carries the 1,355-byte proof. Server policy accepts threshold 18 only. \`verifyProof\` stays a math check and honors the threshold byte inside the proof.
 
 ---
 
@@ -63,13 +61,11 @@ Key 2 represents the specific semantic predicate (e.g., "Over 18").
 ---
 
 ## 5. Runtime Architecture
-1. **Initiation:** The client receives an institutional challenge (\`challengeId\`).
-2. **Key 1 Execution:** The client signs the challenge and second factor hash using its local P-256 private key.
-3. **Key 1 Server Verification:** The client sends the payload to \`POST /api/v1/dual-key/verify\`.
-4. **Hard Gate:** If the server rejects Key 1, execution stops.
-5. **Key 2 Execution:** If Key 1 is valid, the client generates the 1355-byte B2 range proof.
-6. **Key 2 Server Verification:** The client sends the proof to \`POST /api/v1/age-gate/verify\`.
-7. **Final Decision:** The orchestrator evaluates both server responses.
+1. **Initiation:** The client receives an institutional challenge (\`challengeId\`) and checks the institutional signature locally.
+2. **Proof:** The client builds the 1,355-byte range proof at threshold 18.
+3. **User signature:** The client signs \`challengeId:secondFactorHash:proofSha256Hex\`.
+4. **Clearance:** One POST carries the signature and \`proofBase64\`. The server sets the nonce in flight before the first await, then checks the signature and the policy threshold.
+5. **Decision:** Both flags follow that single response. A rejection discards the proof. The nonce is consumed only after both checks succeed.
 
 ---
 
@@ -352,8 +348,8 @@ To maintain transparency and auditability, the project explicitly disclaims the 
                 </p>
                 <ul className="text-xs text-slate-600 space-y-1 ml-4 list-disc">
                   <li><strong>Mechanism:</strong> ECDSA P-256 signature over a specific challenge.</li>
-                  <li><strong>Validation Path:</strong> The client transmits a <code>DualKeyPayload</code> to the server at <code>POST /api/v1/dual-key/verify</code>. The server performs real ECDSA P-256 verification.</li>
-                  <li><strong>Orchestration Constraint:</strong> The orchestrator enforces a <strong>fail-closed rule</strong>. If Key 1 server verification fails or the payload is tampered with, the flow terminates immediately. Key 2 (Age-Gate) is never generated.</li>
+                  <li><strong>Validation Path:</strong> One clearance body goes to <code>POST /api/v1/dual-key/verify</code>, which is the same handler as <code>POST /api/v1/age-gate/verify</code>. The server checks the user signature over <code>challengeId:secondFactorHash:proofSha256Hex</code>.</li>
+                  <li><strong>Orchestration Constraint:</strong> The range proof is built before that POST. A rejected signature or proof fails the clearance and the orchestrator discards the proof bytes. A bad signature does not consume the nonce.</li>
                 </ul>
               </div>
               <div>
@@ -363,7 +359,7 @@ To maintain transparency and auditability, the project explicitly disclaims the 
                 </p>
                 <ul className="text-xs text-slate-600 space-y-1 ml-4 list-disc">
                   <li><strong>Mechanism:</strong> A Non-Interactive Zero-Knowledge Proof (NIZKP). Uses Pedersen commitments on NIST P-256 with a NUMS (Nothing Up My Sleeve) generator H, performing a B2 8-bit bit-decomposition range proof.</li>
-                  <li><strong>Validation Path:</strong> The client generates a fixed 1355-byte binary proof. This is transmitted to the server at <code>POST /api/v1/age-gate/verify</code> for cryptographic verification.</li>
+                  <li><strong>Validation Path:</strong> The same clearance body carries the 1,355-byte proof. Server policy accepts threshold 18 only. <code>verifyProof</code> stays a math check and honors the threshold byte inside the proof.</li>
                 </ul>
               </div>
             </div>
