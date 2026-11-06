@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 node_modules/
 build/
 dist/
@@ -39,3 +40,19 @@ _archive/
 tests/
 saml_engine/test_engine.py
 
+=======
+node_modules
+.git
+.env
+.env.*
+dist
+npm-debug.log*
+*.log
+.antigravity
+.agents
+_archive
+.vscode
+.gitignore
+.DS_Store
+**/*.md
+>>>>>>> origin/main

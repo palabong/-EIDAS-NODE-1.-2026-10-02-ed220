@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -61,3 +62,6 @@ if (isDirectRun) {
     process.exit(1);
   });
 }
+=======
+const PORT = Number(process.env.PORT || 3000);
+>>>>>>> origin/main
