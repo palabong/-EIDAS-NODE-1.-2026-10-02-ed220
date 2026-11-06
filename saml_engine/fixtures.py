@@ -291,10 +291,11 @@ def build_signed_saml_response(
     else:
         assertions_payload = assertion_with_sig
 
+    in_resp_attr = f' InResponseTo="{in_response_to}"' if in_response_to is not None else ''
     response_xml = (
         f'<saml2p:Response xmlns:saml2p="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml2="urn:oasis:names:tc:SAML:2.0:assertion" '
         f'Consent="urn:oasis:names:tc:SAML:2.0:consent:obtained" Destination="{destination}" '
-        f'ID="{resp_id}" InResponseTo="{in_response_to}" IssueInstant="{t_issue}" Version="2.0">'
+        f'ID="{resp_id}"{in_resp_attr} IssueInstant="{t_issue}" Version="2.0">'
         f'<saml2:Issuer Format="urn:oasis:names:tc:SAML:2.0:nameid-format:entity">{resp_issuer}</saml2:Issuer>'
         f'<saml2p:Status><saml2p:StatusCode Value="{status_code}"></saml2p:StatusCode><saml2p:StatusMessage>{status_code}</saml2p:StatusMessage></saml2p:Status>'
         f'{assertions_payload}'
@@ -395,3 +396,35 @@ def get_minor_response(**kwargs) -> str:
         loa="http://eidas.europa.eu/LoA/high",
         **kwargs
     )
+
+def get_swiss_adult_response(**kwargs) -> str:
+    return build_signed_saml_response(
+        given_name="Heinrich",
+        family_name="Keller",
+        date_of_birth="1994-05-12",
+        person_identifier="CHE-ZH-884210-HK",
+        loa="http://eidas.europa.eu/LoA/substantial",
+        **kwargs
+    )
+
+def get_eu_adult_response(**kwargs) -> str:
+    return build_signed_saml_response(
+        given_name="Clara",
+        family_name="Schmidt",
+        date_of_birth="1988-11-20",
+        person_identifier="DEU-BER-991204-CS",
+        loa="http://eidas.europa.eu/LoA/high",
+        **kwargs
+    )
+
+def get_minor_luca_response(**kwargs) -> str:
+    return build_signed_saml_response(
+        given_name="Luca",
+        family_name="Rossi",
+        date_of_birth="2009-08-14",
+        person_identifier="CHE-TI-110482-LR",
+        loa="http://eidas.europa.eu/LoA/substantial",
+        **kwargs
+    )
+
+

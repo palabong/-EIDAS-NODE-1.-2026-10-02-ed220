@@ -25,6 +25,7 @@ import { DEFAULT_PROFILE, DEFAULT_THEME, DEFAULT_PORTFOLIO, DEFAULT_SCREENING_TI
 
 import DocumentationMode from './components/DocumentationMode';
 import UnifiedLabDemo from './sandbox/UnifiedLabDemo';
+import SwissUnifiedPoCDemo from './sandbox/SwissUnifiedPoCDemo';
 
 import { BilanxStressTest } from './sandbox/BilanxStressTest';
 import { useGoogleAuth, VerifiedGoogleUser } from './hooks/useGoogleAuth';
@@ -283,8 +284,8 @@ function BilanxApp({
   // Current Theme parameters. Defaults to "Vibrant Palette" aesthetic (slate dark base, cyan + indigo highlights)
   const [theme, setTheme] = useState<ThemeConfig>(DEFAULT_THEME);
   
-  // Navigation active Mode: 'showcase' | 'documentation' | 'stresstest' | 'eidas_node'
-  const [activeMode, setActiveMode] = useState<'showcase' | 'documentation' | 'stresstest' | 'eidas_node'>('eidas_node');
+  // Navigation active Mode: 'swiss_demo' | 'showcase' | 'documentation' | 'stresstest' | 'eidas_node'
+  const [activeMode, setActiveMode] = useState<'swiss_demo' | 'showcase' | 'documentation' | 'stresstest' | 'eidas_node'>('swiss_demo');
 
   // Simple Security clearance level bypass (to demonstrate high-tech security credentials)
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
@@ -379,6 +380,18 @@ function BilanxApp({
 
         {/* Dynamic Mode Navigation Tabs with Institutional Slate Underlines */}
         <nav className="flex items-center gap-3 md:gap-6 text-xs font-bold uppercase tracking-widest text-slate-500 overflow-x-auto py-1">
+          <button 
+            id="nav-swiss-demo"
+            onClick={() => setActiveMode('swiss_demo')}
+            className={`cursor-pointer transition-all pb-1.5 flex items-center gap-1.5 whitespace-nowrap ${
+              activeMode === 'swiss_demo' 
+                ? 'text-red-700 border-b-2 border-red-700 font-black' 
+                : 'hover:text-slate-800'
+            }`}
+          >
+            <span>🇨🇭</span> Swiss Sovereign E2E Demo
+          </button>
+
           <button 
             id="nav-eidas-node"
             onClick={() => setActiveMode('eidas_node')}
@@ -551,6 +564,10 @@ function BilanxApp({
 
       {/* 🏛️ MAIN INSTITUTIONAL WORKSPACE */}
       <main className="flex-1 px-4 md:px-10 py-8 max-w-7xl mx-auto w-full">
+        {activeMode === 'swiss_demo' && (
+          <SwissUnifiedPoCDemo currentUser={user} />
+        )}
+
         {activeMode === 'eidas_node' && (
           <EidasNodeLab />
         )}

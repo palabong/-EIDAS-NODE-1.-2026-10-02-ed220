@@ -1,5 +1,6 @@
 import { p256 } from '@noble/curves/nist.js';
 import { G, H, pedersenCommit } from './pedersen';
+import { bytesToHex } from '../../../lib/crypto/encoding';
 
 async function hashToScalar(...inputs: Uint8Array[]): Promise<bigint> {
   const totalLength = inputs.reduce((acc, val) => acc + val.length, 0);
@@ -26,14 +27,6 @@ function generateRandomScalar(): bigint {
     hex += bytes[i].toString(16).padStart(2, '0');
   }
   return BigInt('0x' + hex) % p256.Point.Fn.ORDER;
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  let hex = '';
-  for (let i = 0; i < bytes.length; i++) {
-    hex += bytes[i].toString(16).padStart(2, '0');
-  }
-  return hex;
 }
 
 export type BitCommitmentProof = {

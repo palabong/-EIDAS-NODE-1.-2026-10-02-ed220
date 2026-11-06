@@ -10,11 +10,13 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "test": "npm run test:all",
-    "test:all": "python3 -m unittest saml_engine/test_engine.py && npx tsx tests/saml_e2e_server_test.ts && npx tsx src/sandbox/tests/b2_acceptance_harness.ts && npx tsx src/sandbox/tests/e2e_dualkey_agegate_harness.ts && npx tsx tests/webauthn_e2e_test.ts",
+    "test:all": "python3 -m unittest saml_engine/test_engine.py && npx tsx tests/saml_e2e_server_test.ts && npx tsx tests/b2_acceptance_harness.ts && npx tsx tests/e2e_dualkey_agegate_harness.ts && npx tsx tests/webauthn_e2e_test.ts && npx tsx tests/swiss_unified_e2e_test.ts && npx tsx tests/adversarial_security_stress_test.ts",
+    "test:swiss": "npx tsx tests/swiss_unified_e2e_test.ts",
     "test:saml": "python3 -m unittest saml_engine/test_engine.py && npx tsx tests/saml_e2e_server_test.ts",
-    "test:zkp": "npx tsx src/sandbox/tests/b2_acceptance_harness.ts",
-    "test:dualkey": "npx tsx src/sandbox/tests/e2e_dualkey_agegate_harness.ts",
-    "test:webauthn": "npx tsx tests/webauthn_e2e_test.ts"
+    "test:zkp": "npx tsx tests/b2_acceptance_harness.ts",
+    "test:dualkey": "npx tsx tests/e2e_dualkey_agegate_harness.ts",
+    "test:webauthn": "npx tsx tests/webauthn_e2e_test.ts",
+    "test:adversarial": "npx tsx tests/adversarial_security_stress_test.ts"
   },
   "dependencies": {
     "@noble/curves": "^2.2.0",
@@ -31,10 +33,10 @@
     "vite": "^6.2.3"
   },
   "devDependencies": {
-    "@flydotio/dockerfile": "^0.7.4",
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
-    "autoprefixer": "^10.4.21",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",

@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { KpiTelemetry } from '../../lib/KpiTelemetry';
 import { useDualKeyResult } from '../context/DualKeyResultContext';
+import { bufferToHex, base64ToBuffer, bufferToBase64Url } from '../../lib/crypto/encoding';
 
 export type HandshakeState = 
   | 'IDLE' 
@@ -48,52 +49,6 @@ interface InstitutionalChallengeResponse {
  */
 const ECDSA_ALGO = { name: 'ECDSA', namedCurve: 'P-256' };
 
-/**
- * Helper function to convert an ArrayBuffer to a Hex String
- */
-function bufferToHex(buffer: ArrayBuffer): string {
-  return Array.from(new Uint8Array(buffer))
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-/**
- * Helper function to convert a Base64 string to an ArrayBuffer.
- * Includes basic validation to prevent common decoding errors.
- */
-function base64ToBuffer(base64: string): ArrayBuffer {
-  if (!base64 || typeof base64 !== 'string') {
-    throw new Error('Invalid Base64 input');
-  }
-  try {
-    const binaryString = window.atob(base64);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-    return bytes.buffer;
-  } catch (error) {
-    throw new Error('Failed to decode Base64 string');
-  }
-}
-
-/**
- * Helper function to convert a Buffer or ArrayBuffer to base64url (no padding)
- */
-function bufferToBase64Url(buffer: ArrayBuffer): string {
-  if (typeof Buffer !== 'undefined') {
-    return Buffer.from(buffer).toString('base64url');
-  }
-  const bytes = new Uint8Array(buffer);
-  let binaryString = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binaryString += String.fromCharCode(bytes[i]);
-  }
-  const base64 = window.btoa(binaryString);
-  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
 // ======================================================================
 // INDEXEDDB KEY STORAGE
 // ======================================================================
@@ -129,6 +84,7 @@ function getDB(): Promise<IDBDatabase> {
  * Returns true if successful, false otherwise.
  */
 async function saveKeyPair(id: string, keyPair: CryptoKeyPair): Promise<boolean> {
+  if (typeof indexedDB === 'undefined') return false;
   try {
     const db = await getDB();
     
@@ -158,6 +114,7 @@ async function saveKeyPair(id: string, keyPair: CryptoKeyPair): Promise<boolean>
  * Returns null if not found, corrupted, or if IndexedDB is unavailable.
  */
 async function loadKeyPair(id: string): Promise<CryptoKeyPair | null> {
+  if (typeof indexedDB === 'undefined') return null;
   try {
     const db = await getDB();
     return await new Promise((resolve) => {
@@ -234,8 +191,13 @@ async function deleteKeyPair(id: string): Promise<boolean> {
  */
 export async function performDualKeyHandshake(
   institutionId: string,
-  secondFactorId: string
+  secondFactorId: string,
+  options?: { fetchFn?: typeof fetch; baseUrl?: string } | typeof fetch
 ): Promise<DualKeyValidationResult & { coreCryptoTime: number }> {
+  const localFetch = typeof options === 'function' ? options : (options?.fetchFn || fetch);
+  const baseUrl = (typeof options === 'object' && options?.baseUrl) || (typeof window !== 'undefined' && window.location ? window.location.origin : '');
+  const resolveUrl = (path: string) => baseUrl ? `${baseUrl.replace(/\/$/, '')}${path}` : path;
+
   const startTime = performance.now();
   let coreCryptoTime = 0;
   let t0 = 0;
@@ -269,7 +231,7 @@ export async function performDualKeyHandshake(
     
     let challengeData: InstitutionalChallengeResponse;
     try {
-      const response = await fetch('/api/institutional-challenge', {
+      const response = await localFetch(resolveUrl('/api/institutional-challenge'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ institutionId })
@@ -383,7 +345,7 @@ export async function performDualKeyHandshake(
       logs.push('Verifier: Sending payload to server for validation...');
       try {
         const verifyStart = performance.now();
-        const verifyRes = await fetch('/api/v1/dual-key/verify', {
+        const verifyRes = await localFetch(resolveUrl('/api/v1/dual-key/verify'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)

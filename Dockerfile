@@ -1,7 +1,7 @@
 # syntax = docker/dockerfile:1
 
 # Adjust BUN_VERSION as desired
-ARG BUN_VERSION=
+ARG BUN_VERSION=1
 FROM oven/bun:${BUN_VERSION}-slim AS base
 
 LABEL fly_launch_runtime="Node.js"
@@ -22,7 +22,7 @@ RUN apt-get update -qq && \
 
 # Install node modules
 COPY bun.lock package-lock.json package.json ./
-RUN bun install --include=dev
+RUN bun install --no-frozen-lockfile
 
 # Copy application code
 COPY . .
@@ -31,11 +31,16 @@ COPY . .
 RUN bun --bun run build
 
 # Remove development dependencies
-RUN npm prune --omit=dev
+RUN rm -rf node_modules && bun install --production --no-frozen-lockfile
 
 
 # Final stage for app image
 FROM base
+
+# Install runtime dependencies required for SAML 2.0 engine execution and cryptography
+RUN apt-get update -qq && \
+    apt-get install --no-install-recommends -y python3 python-is-python3 openssl && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy built application
 COPY --from=build /app /app

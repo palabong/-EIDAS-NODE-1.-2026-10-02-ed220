@@ -1,4 +1,7 @@
-import { runDualKeyAgeGate } from '../lib/e2e/runDualKeyAgeGate';
+import { createServer } from 'http';
+import type { AddressInfo } from 'net';
+import { createApp } from '../src/server/app.ts';
+import { runDualKeyAgeGate } from '../src/sandbox/lib/e2e/runDualKeyAgeGate.ts';
 
 async function runTests() {
   console.log("=== Running Bilanx DK-SVS E2E Age-Gate Acceptance Harness ===");
@@ -22,39 +25,17 @@ async function runTests() {
     };
   }
 
-  // Ensure dummy server or backend logic exists if required by performDualKeyHandshake
-  // We mock fetch globally just for this test so performDualKeyHandshake works without a real server
+  // Boot ephemeral Express server with createApp()
+  const app = createApp();
+  const server = createServer(app);
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const port = (server.address() as AddressInfo).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
-    if (url === '/api/institutional-challenge') {
-      if (originalFetch) {
-        try {
-          return await originalFetch('http://localhost:3000/api/institutional-challenge', options);
-        } catch (e) {
-          // fallback if offline
-        }
-      }
-
-      const crypto = globalThis.crypto;
-      const keyPair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-      const challenge = "mock-challenge-" + Math.random();
-      const challengeBuffer = new TextEncoder().encode(challenge);
-      const signatureBuffer = await crypto.subtle.sign({ name: 'ECDSA', hash: { name: 'SHA-256' } }, keyPair.privateKey, challengeBuffer);
-      const signatureBase64 = Buffer.from(signatureBuffer).toString('base64');
-      const publicKeyJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
-
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          success: true,
-          challenge,
-          signatureBase64,
-          publicKeyJwk
-        })
-      } as Response;
-    }
-    
     if (url.toString().startsWith('/api/v1/dual-key/verify')) {
       if ((globalThis as any).__forceDualKeyVerifyFail) {
         return {
@@ -63,9 +44,11 @@ async function runTests() {
           json: async () => ({ valid: false, reason: 'FORCED_FAILURE_TEST' })
         } as Response;
       }
-      if (originalFetch) {
-        return originalFetch('http://localhost:3000' + url.toString(), options);
-      }
+      return originalFetch(baseUrl + url.toString(), options);
+    }
+    
+    if (url.toString().startsWith('/api/')) {
+      return originalFetch(baseUrl + url.toString(), options);
     }
     
     if (originalFetch) return originalFetch(url, options);
@@ -123,7 +106,7 @@ async function runTests() {
         r4.proofBytes[0] ^= 0xFF;
       }
       
-      const { verifyProof } = await import('../lib/nizkp');
+      const { verifyProof } = await import('../src/sandbox/lib/nizkp.ts');
       const tamperedVerify = await verifyProof(r4.proofBytes);
       assertEqual(false, tamperedVerify, "E4 verify after tamper should be false");
       
@@ -191,6 +174,9 @@ async function runTests() {
 
   } finally {
     globalThis.fetch = originalFetch;
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
   }
 
   console.table(results);

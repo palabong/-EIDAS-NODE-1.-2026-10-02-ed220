@@ -23,3 +23,19 @@ secrets/
 data/
 *.sqlite
 *.db
+
+# Python bytecode and caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Architecture Hygiene & Non-Production Isolation (R1)
+.git/
+.antigravity/
+.vscode/
+archive/
+_archive/
+.agents/
+tests/
+saml_engine/test_engine.py
+

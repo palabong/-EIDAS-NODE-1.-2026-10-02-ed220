@@ -258,6 +258,18 @@ export function getPresetFixtureXml(presetKey: string): string {
     case 'underage_cashier':
       funcName = 'get_minor_response()';
       break;
+    case 'swiss_adult':
+    case 'heinrich_keller':
+      funcName = 'get_swiss_adult_response()';
+      break;
+    case 'eu_adult':
+    case 'clara_schmidt':
+      funcName = 'get_eu_adult_response()';
+      break;
+    case 'minor_luca':
+    case 'luca_rossi':
+      funcName = 'get_minor_luca_response()';
+      break;
     default:
       funcName = 'get_valid_rsa_response()';
   }

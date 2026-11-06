@@ -4,6 +4,8 @@
  * Interacts directly with Apple Secure Enclave / Android StrongBox / TPM 2.0 hardware.
  */
 
+import { bytesToBase64, base64UrlToBytes } from './crypto/encoding';
+
 export interface WebAuthnCredentialInfo {
   id: string;
   rawId: string;
@@ -57,7 +59,7 @@ export async function registerHardwareEnclaveKey(
   const options = await optRes.json();
 
   // Convert challenge string to Uint8Array
-  const challengeBuffer = Uint8Array.from(atob(options.challenge.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+  const challengeBuffer = base64UrlToBytes(options.challenge);
   const userIdBuffer = new TextEncoder().encode(options.user.id);
 
   const publicKeyCredentialCreationOptions: PublicKeyCredentialCreationOptions = {
@@ -95,9 +97,9 @@ export async function registerHardwareEnclaveKey(
 
   const response = credential.response as AuthenticatorAttestationResponse;
 
-  const rawIdB64 = btoa(String.fromCharCode(...new Uint8Array(credential.rawId)));
-  const clientDataJSONB64 = btoa(String.fromCharCode(...new Uint8Array(response.clientDataJSON)));
-  const attestationObjectB64 = btoa(String.fromCharCode(...new Uint8Array(response.attestationObject)));
+  const rawIdB64 = bytesToBase64(new Uint8Array(credential.rawId));
+  const clientDataJSONB64 = bytesToBase64(new Uint8Array(response.clientDataJSON));
+  const attestationObjectB64 = bytesToBase64(new Uint8Array(response.attestationObject));
 
   const credentialInfo: WebAuthnCredentialInfo = {
     id: credential.id,
@@ -149,8 +151,8 @@ export async function authenticateWithHardwareEnclave(
 
   const options = await optRes.json();
 
-  const challengeBuffer = Uint8Array.from(atob(options.challenge.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
-  const credentialIdBuffer = Uint8Array.from(atob(credentialId.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+  const challengeBuffer = base64UrlToBytes(options.challenge);
+  const credentialIdBuffer = base64UrlToBytes(credentialId);
 
   const publicKeyCredentialRequestOptions: PublicKeyCredentialRequestOptions = {
     challenge: challengeBuffer,
@@ -176,10 +178,10 @@ export async function authenticateWithHardwareEnclave(
 
   const response = assertion.response as AuthenticatorAssertionResponse;
 
-  const rawIdB64 = btoa(String.fromCharCode(...new Uint8Array(assertion.rawId)));
-  const clientDataJSONB64 = btoa(String.fromCharCode(...new Uint8Array(response.clientDataJSON)));
-  const authenticatorDataB64 = btoa(String.fromCharCode(...new Uint8Array(response.authenticatorData)));
-  const signatureB64 = btoa(String.fromCharCode(...new Uint8Array(response.signature)));
+  const rawIdB64 = bytesToBase64(new Uint8Array(assertion.rawId));
+  const clientDataJSONB64 = bytesToBase64(new Uint8Array(response.clientDataJSON));
+  const authenticatorDataB64 = bytesToBase64(new Uint8Array(response.authenticatorData));
+  const signatureB64 = bytesToBase64(new Uint8Array(response.signature));
 
   const assertionInfo: WebAuthnCredentialInfo = {
     id: assertion.id,
@@ -189,7 +191,7 @@ export async function authenticateWithHardwareEnclave(
       clientDataJSON: clientDataJSONB64,
       authenticatorData: authenticatorDataB64,
       signature: signatureB64,
-      userHandle: response.userHandle ? btoa(String.fromCharCode(...new Uint8Array(response.userHandle))) : undefined
+      userHandle: response.userHandle ? bytesToBase64(new Uint8Array(response.userHandle)) : undefined
     },
     authenticatorAttachment: assertion.authenticatorAttachment || 'platform'
   };

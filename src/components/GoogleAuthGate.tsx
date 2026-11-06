@@ -159,6 +159,34 @@ export function GoogleAuthGate({
             </p>
           </div>
 
+          {/* Swiss Demonstration Sandbox Bypass */}
+          <div className="w-full pt-1 border-t border-slate-800/80">
+            <button
+              id="btn-swiss-demo-bypass"
+              onClick={() => {
+                const demoUser: VerifiedGoogleUser = {
+                  uid: 'CHE-DEMO-001',
+                  name: 'Heinrich Keller (Swiss Sovereign Sandbox)',
+                  email: 'heinrich.keller@bilanx.ch',
+                  picture: '',
+                  emailVerified: true,
+                  issuer: 'https://bilanx.admin.ch/idp',
+                  authenticatedAt: new Date().toISOString(),
+                  sessionToken: 'DEMO-SWISS-SANDBOX-TOKEN'
+                };
+                localStorage.setItem('bilanx_verified_google_user', JSON.stringify(demoUser));
+                onLoginSuccess(demoUser);
+              }}
+              className="w-full py-2.5 px-4 bg-gradient-to-r from-red-700/90 to-red-600/90 hover:from-red-600 hover:to-red-500 text-white rounded-xl font-bold text-xs flex items-center justify-center gap-2 border border-red-500/40 shadow-lg transition-all cursor-pointer"
+            >
+              <span>🇨🇭</span>
+              <span>Explore Swiss Demonstration (Sandbox / Offline)</span>
+            </button>
+            <p className="text-[10px] text-slate-500 text-center mt-1.5 font-mono">
+              Direct evaluator access with client-quarantined eIDAS / FIDO2 demonstration
+            </p>
+          </div>
+
         </div>
 
         {/* Footer */}

@@ -1,6 +1,6 @@
-import { generateProof, verifyProof } from '../lib/nizkp';
-import { generateBitwiseRangeProof, verifyBitwiseRangeProof } from '../lib/crypto/range_b2';
-import { encodeBitwiseRangeProof, decodeBitwiseRangeProof } from '../lib/crypto/range_b2_codec';
+import { generateProof, verifyProof } from '../src/sandbox/lib/nizkp.ts';
+import { generateBitwiseRangeProof, verifyBitwiseRangeProof } from '../src/sandbox/lib/crypto/range_b2.ts';
+import { encodeBitwiseRangeProof, decodeBitwiseRangeProof } from '../src/sandbox/lib/crypto/range_b2_codec.ts';
 import { performance } from 'node:perf_hooks';
 
 async function runTests() {
