@@ -43,6 +43,8 @@ interface InstitutionalChallengeResponse {
   challenge: string;
   signatureBase64: string;
   publicKeyJwk: JsonWebKey;
+  keyId?: string;
+  jurisdiction?: string;
   error?: string;
 }
 

@@ -4,14 +4,13 @@
  */
 
 import express from 'express';
-import path from 'path';
-import fs from 'fs/promises';
-import { webcrypto } from 'crypto';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-import { getErrorMessage, isOriginAllowedCors } from './httpShared.ts';
+import { isOriginAllowedCors } from './httpShared.ts';
+import { getInstitutionalKeyPair } from './institutionalKey.ts';
+import { clearanceMetricsSnapshot } from './clearanceAudit.ts';
 
 export {
   getClientIp,
@@ -23,6 +22,17 @@ export {
 } from './httpShared.ts';
 
 export { activeChallenges, CHALLENGE_TTL_MS } from './clearance.ts';
+export {
+  getInstitutionalKey,
+  getInstitutionalKeyPair,
+  rotateInstitutionalKey,
+  releaseInstitutionalKey,
+  jurisdictionForInstitution,
+  loadPrimaryKeyOrThrow,
+  type InstitutionalJurisdiction,
+  type InstitutionalKeyMaterial,
+  type InstitutionalKeySource,
+} from './institutionalKey.ts';
 
 import { mountAuthRoutes } from './routes/authRoutes.ts';
 import { mountSamlRoutes } from './routes/samlRoutes.ts';
@@ -60,90 +70,15 @@ export function validateStartupEnvironment(): void {
   }
 }
 
-// =========================================================================
-// 🔐 INSTITUTIONAL KEY MANAGEMENT (REM-01)
-// =========================================================================
-let backendInstitutionalKeyPair: webcrypto.CryptoKeyPair | null = null;
-
-export async function getInstitutionalKeyPair(): Promise<webcrypto.CryptoKeyPair> {
-  if (backendInstitutionalKeyPair) {
-    return backendInstitutionalKeyPair;
-  }
-
-  const algo = { name: 'ECDSA', namedCurve: 'P-256' };
-
-  // Tier 1: Load directly from environment variable (Cloud Run / K8s Secret injection)
-  const envKeyJson = process.env.INSTITUTIONAL_KEY_JSON;
-  if (envKeyJson && envKeyJson.trim()) {
-    try {
-      const { publicKeyJwk, privateKeyJwk } = JSON.parse(envKeyJson);
-      if (!publicKeyJwk || !privateKeyJwk) {
-        throw new Error("Missing 'publicKeyJwk' or 'privateKeyJwk' in INSTITUTIONAL_KEY_JSON.");
-      }
-      const publicKey = await webcrypto.subtle.importKey('jwk', publicKeyJwk, algo, true, ['verify']);
-      const privateKey = await webcrypto.subtle.importKey('jwk', privateKeyJwk, algo, true, ['sign']);
-      backendInstitutionalKeyPair = { publicKey, privateKey };
-      console.log('[InstitutionalKey] Successfully imported institutional key pair from INSTITUTIONAL_KEY_JSON environment variable.');
-      return backendInstitutionalKeyPair;
-    } catch (err: unknown) {
-      console.error('[InstitutionalKey] Failed to import key pair from INSTITUTIONAL_KEY_JSON:', getErrorMessage(err));
-      if (process.env.NODE_ENV === 'production') {
-        throw new Error(`[FATAL] Invalid INSTITUTIONAL_KEY_JSON secret: ${getErrorMessage(err)}`);
-      }
-    }
-  }
-
-  // Tier 2 & 3: Load from configured file path or default local file
-  const keyFilePath = process.env.INSTITUTIONAL_KEY_PATH || path.join(process.cwd(), 'institutional-key.json');
-  try {
-    const fileData = await fs.readFile(keyFilePath, 'utf-8');
-    const { publicKeyJwk, privateKeyJwk } = JSON.parse(fileData);
-    if (!publicKeyJwk || !privateKeyJwk) {
-      throw new Error("Missing 'publicKeyJwk' or 'privateKeyJwk' in key file.");
-    }
-    const publicKey = await webcrypto.subtle.importKey('jwk', publicKeyJwk, algo, true, ['verify']);
-    const privateKey = await webcrypto.subtle.importKey('jwk', privateKeyJwk, algo, true, ['sign']);
-    backendInstitutionalKeyPair = { publicKey, privateKey };
-    console.log(`[InstitutionalKey] Loaded persistent institutional key pair from disk (${keyFilePath}).`);
-    return backendInstitutionalKeyPair;
-  } catch (err: unknown) {
-    const isEnoent = err && typeof err === 'object' && 'code' in err && (err as { code: string }).code === 'ENOENT';
-    if (!isEnoent) {
-      console.warn(`[InstitutionalKey] Warning reading key file at ${keyFilePath}:`, getErrorMessage(err));
-    }
-  }
-
-  // Tier 4: Production Fail-Closed Check
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error(
-      '[FATAL] Production configuration error: Institutional key pair not found. ' +
-      'Set INSTITUTIONAL_KEY_JSON or INSTITUTIONAL_KEY_PATH in environment variables.'
-    );
-  }
-
-  // Development / Sandbox Fallback: Ephemeral In-Memory Key Pair
-  console.warn('[InstitutionalKey] NOTICE: Generating ephemeral in-memory ECDSA P-256 key pair for development/sandbox. Challenges will not persist across restarts.');
-  backendInstitutionalKeyPair = await webcrypto.subtle.generateKey(algo, true, ['sign', 'verify']);
-
-  // Optional dev persistence only when explicitly requested
-  if (process.env.PERSIST_DEV_KEYS === 'true') {
-    try {
-      const publicKeyJwk = await webcrypto.subtle.exportKey('jwk', backendInstitutionalKeyPair.publicKey);
-      const privateKeyJwk = await webcrypto.subtle.exportKey('jwk', backendInstitutionalKeyPair.privateKey);
-      await fs.writeFile(keyFilePath, JSON.stringify({ publicKeyJwk, privateKeyJwk }, null, 2), { mode: 0o600 });
-      console.log(`[InstitutionalKey] Persisted development key pair to ${keyFilePath}.`);
-    } catch (writeErr: unknown) {
-      console.warn('[InstitutionalKey] Could not persist development key pair to disk (ignoring in dev):', getErrorMessage(writeErr));
-    }
-  }
-
-  return backendInstitutionalKeyPair;
-}
-
 /**
  * Creates and configures the core Express application with security headers,
  * CORS policy, body parsers, and all authenticated API routes.
  */
+/** Preset SAML minting exists for harnesses only. Production ignores isTest. */
+export function samlPresetsAllowed(options?: { isTest?: boolean }): boolean {
+  return options?.isTest === true && process.env.NODE_ENV !== 'production';
+}
+
 export function createApp(options?: { isTest?: boolean }): express.Express {
   const app = express();
 
@@ -185,8 +120,12 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
     res.json({ status: "healthy", timestamp: new Date().toISOString() });
   });
 
+  app.get("/api/metrics", (_req, res) => {
+    res.json({ clearance: clearanceMetricsSnapshot() });
+  });
+
   mountAuthRoutes(app);
-  mountSamlRoutes(app);
+  mountSamlRoutes(app, { allowSamlPresets: samlPresetsAllowed(options) });
   mountClearanceRoutes(app, getInstitutionalKeyPair);
   mountWebAuthnRoutes(app);
 

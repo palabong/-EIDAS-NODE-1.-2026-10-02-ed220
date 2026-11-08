@@ -29,7 +29,7 @@ async function runTestSuite() {
   console.log('================================================================================\n');
 
   // Boot ephemeral Express server with createApp()
-  const app = createApp();
+  const app = createApp({ isTest: true });
   const server = createServer(app);
 
   await new Promise<void>((resolve) => {
@@ -60,6 +60,7 @@ async function runTestSuite() {
     console.log('[VECTOR 1] Testing Swiss Citizen Sovereign Validation (Heinrich Keller, age 32)...');
     const swissResult = await runSwissDemonstration({
       citizenPreset: 'swiss_adult',
+      productUid: 'UID-9904-AUTH-951',
       baseUrl
     });
 
@@ -109,6 +110,7 @@ async function runTestSuite() {
     console.log('[VECTOR 2] Testing EU Citizen Sovereign Validation (Dr. Clara Schmidt, age 37)...');
     const euResult = await runSwissDemonstration({
       citizenPreset: 'eu_adult',
+      productUid: 'UID-9904-AUTH-951',
       baseUrl
     });
 
@@ -129,6 +131,7 @@ async function runTestSuite() {
     console.log('[VECTOR 3] Testing Underage Minor Rejection (Luca Rossi, age 17)...');
     const minorResult = await runSwissDemonstration({
       citizenPreset: 'minor_luca',
+      productUid: 'UID-9904-AUTH-951',
       baseUrl
     });
 
@@ -232,6 +235,7 @@ async function runTestSuite() {
     console.log('[VECTOR 5] Testing Second-Factor Hardware Fingerprint Tampering Defense...');
     const tamperedResult = await runSwissDemonstration({
       citizenPreset: 'swiss_adult',
+      productUid: 'UID-9904-AUTH-951',
       baseUrl,
       tamperHardwareFingerprint: true
     });

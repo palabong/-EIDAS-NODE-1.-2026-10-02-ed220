@@ -17,6 +17,9 @@
  */
 
 import crypto from 'crypto';
+import { CapacityExceededError } from './httpShared.ts';
+import { bindDurableStore, openDurableMap, type DurableStore } from './durableStore.ts';
+import { recordClearanceAudit } from './clearanceAudit.ts';
 import { decodeCbor, rawSignatureToDer, isDerSignature } from './webauthnCodec.ts';
 
 export { CborReader, decodeCbor, encodeCbor, rawSignatureToDer, isDerSignature } from './webauthnCodec.ts';
@@ -117,8 +120,32 @@ export function identifyAaguid(aaguid: string): { aaguid: string; deviceName: st
 const CHALLENGE_TTL_MS = 120_000; // 2 minutes
 export const MAX_ACTIVE_WEBAUTHN_CHALLENGES = 5_000;
 export const MAX_STORED_CREDENTIALS = 10_000;
-const activeWebAuthnChallenges = new Map<string, WebAuthnChallengeRecord>();
-const registeredWebAuthnCredentials = new Map<string, StoredWebAuthnCredential>();
+
+const webAuthnChallengeSlot: { current: DurableStore<WebAuthnChallengeRecord> } = {
+  current: openDurableMap<WebAuthnChallengeRecord>('webauthn-challenges'),
+};
+const webAuthnCredentialSlot: { current: DurableStore<StoredWebAuthnCredential> } = {
+  current: openDurableMap<StoredWebAuthnCredential>('webauthn-credentials'),
+};
+
+export const activeWebAuthnChallenges = bindDurableStore(() => webAuthnChallengeSlot.current);
+export const registeredWebAuthnCredentials = bindDurableStore(() => webAuthnCredentialSlot.current);
+
+export function replaceWebAuthnChallengeStore(
+  next: DurableStore<WebAuthnChallengeRecord>
+): DurableStore<WebAuthnChallengeRecord> {
+  const previous = webAuthnChallengeSlot.current;
+  webAuthnChallengeSlot.current = next;
+  return previous;
+}
+
+export function replaceWebAuthnCredentialStore(
+  next: DurableStore<StoredWebAuthnCredential>
+): DurableStore<StoredWebAuthnCredential> {
+  const previous = webAuthnCredentialSlot.current;
+  webAuthnCredentialSlot.current = next;
+  return previous;
+}
 
 // ---------------------------------------------------------------------------
 // Base64 / Base64URL Utilities
@@ -230,6 +257,9 @@ function isOriginAllowed(receivedOrigin: string, expectedOrigin?: string, expect
  */
 export function generateWebAuthnChallenge(): string {
   purgeExpiredChallenges();
+  if (activeWebAuthnChallenges.size >= MAX_ACTIVE_WEBAUTHN_CHALLENGES) {
+    throw new CapacityExceededError('WebAuthn challenge capacity exceeded');
+  }
   const bytes = crypto.randomBytes(32);
   const challenge = bytes.toString('base64url');
   activeWebAuthnChallenges.set(challenge, { challenge, issuedAt: Date.now() });
@@ -250,6 +280,7 @@ export function revokeStoredCredential(credentialId: string, reason?: string): b
   const cred = registeredWebAuthnCredentials.get(credentialId);
   if (!cred) return false;
   cred.compromised = true;
+  registeredWebAuthnCredentials.commit(credentialId);
   return true;
 }
 
@@ -301,15 +332,6 @@ export function purgeExpiredChallenges(): void {
   for (const [key, record] of activeWebAuthnChallenges.entries()) {
     if (now - record.issuedAt > CHALLENGE_TTL_MS) {
       activeWebAuthnChallenges.delete(key);
-    }
-  }
-  if (activeWebAuthnChallenges.size > MAX_ACTIVE_WEBAUTHN_CHALLENGES) {
-    const toDelete = activeWebAuthnChallenges.size - MAX_ACTIVE_WEBAUTHN_CHALLENGES;
-    let deleted = 0;
-    for (const key of activeWebAuthnChallenges.keys()) {
-      activeWebAuthnChallenges.delete(key);
-      deleted++;
-      if (deleted >= toDelete) break;
     }
   }
 }
@@ -552,14 +574,8 @@ export function registerWebAuthnCredential(
     throw new Error(`Credential '${credentialId}' is already registered`);
   }
 
-  // Enforce bounded storage capacity under DDoS registration attacks
   if (registeredWebAuthnCredentials.size >= MAX_STORED_CREDENTIALS) {
-    for (const [id, cred] of registeredWebAuthnCredentials.entries()) {
-      if (!cred.compromised) {
-        registeredWebAuthnCredentials.delete(id);
-        break;
-      }
-    }
+    throw new CapacityExceededError('WebAuthn credential store is at capacity');
   }
 
   // 6. Store Credential Record
@@ -691,7 +707,7 @@ export function verifyWebAuthnAssertion(
     return { verified: false, error: 'User presence flag (UP) not set in authenticatorData' };
   }
 
-  if (params.requireUserVerification && !userVerified) {
+  if ((params.requireUserVerification || cred.authenticatorAttachment === 'cross-platform') && !userVerified) {
     return { verified: false, error: 'User verification flag (UV) required but not set in authenticatorData' };
   }
 
@@ -732,6 +748,8 @@ export function verifyWebAuthnAssertion(
   const signCount = authDataBuf.readUInt32BE(33);
   if ((cred.counter > 0 || signCount > 0) && signCount <= cred.counter) {
     cred.compromised = true;
+    registeredWebAuthnCredentials.commit(credentialId);
+    recordClearanceAudit({ event: 'clone_detected', reason: 'counter_not_increasing' });
     return {
       verified: false,
       error: `Cloned authenticator detected: signCount (${signCount}) did not increase past stored counter (${cred.counter})`
@@ -739,6 +757,8 @@ export function verifyWebAuthnAssertion(
   }
   if (cred.authenticatorAttachment === 'cross-platform' && signCount <= cred.counter) {
     cred.compromised = true;
+    registeredWebAuthnCredentials.commit(credentialId);
+    recordClearanceAudit({ event: 'clone_detected', reason: 'counter_not_increasing' });
     return {
       verified: false,
       error: `Cloned authenticator detected: roaming hardware key signature counter (${signCount}) must strictly exceed stored counter (${cred.counter})`
@@ -747,6 +767,7 @@ export function verifyWebAuthnAssertion(
 
   // 11. Update Counter & Return Verified Credential
   cred.counter = signCount;
+  registeredWebAuthnCredentials.commit(credentialId);
   return {
     verified: true,
     credential: cred,

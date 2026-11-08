@@ -4,12 +4,21 @@
  */
 
 import express from 'express';
-import { getValidatedWebAuthnOrigin } from '../httpShared.ts';
+import { CapacityExceededError, getValidatedWebAuthnOrigin } from '../httpShared.ts';
 import {
   generateWebAuthnChallenge,
   registerWebAuthnCredential,
   verifyWebAuthnAssertion
 } from '../webauthnServer.ts';
+import { recordClearanceAudit } from '../clearanceAudit.ts';
+
+function rejectCapacity(err: unknown, res: express.Response): boolean {
+  if (err instanceof CapacityExceededError) {
+    res.status(429).json({ verified: false, error: err.message });
+    return true;
+  }
+  return false;
+}
 
 export function mountWebAuthnRoutes(app: express.Express): void {
   // WebAuthn ceremony against a software or platform authenticator. Credentials stay in process memory.
@@ -20,7 +29,14 @@ export function mountWebAuthnRoutes(app: express.Express): void {
       return;
     }
     const displayName = req.body?.displayName || username;
-    const challenge = generateWebAuthnChallenge();
+    let challenge: string;
+    try {
+      challenge = generateWebAuthnChallenge();
+    } catch (err: unknown) {
+      if (rejectCapacity(err, res)) return;
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
     const rpId = req.hostname;
     const attachment = req.body?.authenticatorAttachment || req.body?.attachment;
     const residentKey = req.body?.residentKey || 'preferred';
@@ -84,12 +100,24 @@ export function mountWebAuthnRoutes(app: express.Express): void {
 
       res.status(200).json({ verified: true, credential: stored });
     } catch (err: any) {
+      if (rejectCapacity(err, res)) return;
+      const message = typeof err?.message === 'string' ? err.message : '';
+      if (/attestation|certificate/i.test(message)) {
+        recordClearanceAudit({ event: 'attestation_failure', reason: 'attestation_rejected' });
+      }
       res.status(400).json({ verified: false, error: err.message });
     }
   });
 
   app.post(['/api/webauthn/authenticate-options', '/api/auth/webauthn/authenticate-options'], (req, res) => {
-    const challenge = generateWebAuthnChallenge();
+    let challenge: string;
+    try {
+      challenge = generateWebAuthnChallenge();
+    } catch (err: unknown) {
+      if (rejectCapacity(err, res)) return;
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
     const credentialId = req.body?.credentialId;
     const responsePayload: any = { challenge, timeout: 60000, rpId: req.hostname };
     if (credentialId) {
@@ -136,6 +164,7 @@ export function mountWebAuthnRoutes(app: express.Express): void {
 
       res.status(200).json(result);
     } catch (err: any) {
+      if (rejectCapacity(err, res)) return;
       res.status(400).json({ verified: false, error: err.message });
     }
   });

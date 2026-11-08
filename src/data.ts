@@ -281,6 +281,36 @@ export const DEFAULT_UHD_RFID_ASSERTIONS: UhdRfidAssertion[] = [
     issuer: "http://consortium-rfid-svs.int",
     exciseRecovered: 0,
     signature: "SIG-ECDSA-CHRONOS-3221A"
+  },
+  {
+    id: "RFID-SAML-2026-06-23-05",
+    timestamp: "2026-06-23T16:05:00.000Z",
+    hardwareUid: "UID-7701-AUTH-118",
+    productName: "Swiss Appenzeller Alpine Spirits (18+ Restricted)",
+    category: "Alcohol",
+    status: "authentic",
+    hmacSha256: "c4e1a90b77d24f6e8a1c0b55d3e7f291ab06c4d8e1f07a33b9c2d5e6f708192a",
+    tagsRead: 6,
+    rssi: -31,
+    collisions: 0,
+    issuer: "http://consortium-rfid-svs.int",
+    exciseRecovered: 3.85,
+    signature: "SIG-ECDSA-APPZ-7701A"
+  },
+  {
+    id: "RFID-SAML-2026-06-23-06",
+    timestamp: "2026-06-23T16:40:00.000Z",
+    hardwareUid: "UID-4408-AUTH-018",
+    productName: "AgCom Regulated Online Content & Digital Services (18+)",
+    category: "Restricted Hardware",
+    status: "authentic",
+    hmacSha256: "91ab33c0d4e75f1280aa66b1c9e04d77f2a8b5c6d0e193847566778899aabbcc",
+    tagsRead: 2,
+    rssi: -40,
+    collisions: 0,
+    issuer: "http://consortium-rfid-svs.int",
+    exciseRecovered: 0,
+    signature: "SIG-ECDSA-AGCOM-4408A"
   }
 ];
 

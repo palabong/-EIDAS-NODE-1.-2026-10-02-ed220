@@ -25,6 +25,16 @@ export function getErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Thrown when an in-memory security map is full. Callers must answer HTTP 429 and leave existing entries in place. */
+export class CapacityExceededError extends Error {
+  readonly httpStatus = 429;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'CapacityExceededError';
+  }
+}
+
 // Extend Express Request typing
 declare global {
   namespace Express {

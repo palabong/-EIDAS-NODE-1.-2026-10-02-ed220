@@ -15,11 +15,13 @@ import {
   generateSPMetadata,
   generateAuthnRequest,
   validateSAMLResponse,
-  getPresetFixtureXml
+  getPresetFixtureXml,
+  isKnownSamlPreset
 } from '../samlBridge.ts';
 import type { SessionUser } from '../types/saml.ts';
 
-export function mountSamlRoutes(app: express.Express): void {
+export function mountSamlRoutes(app: express.Express, options?: { allowSamlPresets?: boolean }): void {
+  const allowSamlPresets = options?.allowSamlPresets === true;
   // =========================================================================
   // 🇪🇺 eIDAS 2.0 SAML ENDPOINTS (Metadata, AuthnRequest, ACS & Session)
   // =========================================================================
@@ -80,7 +82,43 @@ export function mountSamlRoutes(app: express.Express): void {
       const userAgent = req.headers['user-agent'] || 'Unknown Browser';
 
       let samlResponse = req.body?.SAMLResponse || req.body?.saml_response || req.body?.xml_content || req.body?.samlResponse;
-      if (!samlResponse && req.body?.preset) {
+      if (!samlResponse && req.body?.preset !== undefined) {
+        if (!allowSamlPresets) {
+          await recordAccessLog({
+            userId: 'anonymous',
+            email: 'unknown',
+            name: 'Anonymous SAML Attempt',
+            authMethod: 'eidas_saml',
+            action: 'LOGIN_FAILURE',
+            ipAddress: clientIp,
+            userAgent,
+            status: 'DENIED',
+            metadata: { reason: 'SAML preset fixtures are disabled' },
+          });
+          res.status(403).json({
+            success: false,
+            error: 'SAML preset fixtures are disabled outside the test harness.'
+          });
+          return;
+        }
+        if (typeof req.body.preset !== 'string' || !isKnownSamlPreset(req.body.preset)) {
+          await recordAccessLog({
+            userId: 'anonymous',
+            email: 'unknown',
+            name: 'Anonymous SAML Attempt',
+            authMethod: 'eidas_saml',
+            action: 'LOGIN_FAILURE',
+            ipAddress: clientIp,
+            userAgent,
+            status: 'DENIED',
+            metadata: { reason: 'Unknown SAML preset' },
+          });
+          res.status(400).json({
+            success: false,
+            error: 'Unknown SAML preset.'
+          });
+          return;
+        }
         samlResponse = await getPresetFixtureXml(req.body.preset);
       }
       const relayState = req.body?.RelayState || req.body?.relayState || '/';

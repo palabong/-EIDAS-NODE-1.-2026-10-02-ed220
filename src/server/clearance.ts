@@ -5,6 +5,10 @@
  */
 
 import { webcrypto } from 'crypto';
+import { CapacityExceededError } from './httpShared.ts';
+import { bindDurableStore, openDurableMap, type DurableStore } from './durableStore.ts';
+import { boundedMs, recordClearanceAudit } from './clearanceAudit.ts';
+import { jurisdictionForInstitution } from './institutionalKey.ts';
 import { bytesToHex } from '../lib/crypto/encoding.ts';
 import {
   AGE_GATE_POLICY_THRESHOLD,
@@ -24,24 +28,28 @@ export interface ActiveChallengeRecord {
   inflight: boolean;
   signatureBase64: string;
   institutionId: string;
+  keyId?: string;
 }
 
-export const activeChallenges = new Map<string, ActiveChallengeRecord>();
+const institutionalChallengeSlot: { current: DurableStore<ActiveChallengeRecord> } = {
+  current: openDurableMap<ActiveChallengeRecord>('institutional-challenges'),
+};
+
+export const activeChallenges = bindDurableStore(() => institutionalChallengeSlot.current);
+
+export function replaceInstitutionalChallengeStore(
+  next: DurableStore<ActiveChallengeRecord>
+): DurableStore<ActiveChallengeRecord> {
+  const previous = institutionalChallengeSlot.current;
+  institutionalChallengeSlot.current = next;
+  return previous;
+}
 
 export function purgeExpiredInstitutionalChallenges(): void {
   const now = Date.now();
   for (const [key, record] of activeChallenges.entries()) {
     if (now - record.issuedAt > CHALLENGE_TTL_MS) {
       activeChallenges.delete(key);
-    }
-  }
-  if (activeChallenges.size > MAX_ACTIVE_INSTITUTIONAL_CHALLENGES) {
-    const toDelete = activeChallenges.size - MAX_ACTIVE_INSTITUTIONAL_CHALLENGES;
-    let deleted = 0;
-    for (const key of activeChallenges.keys()) {
-      activeChallenges.delete(key);
-      deleted++;
-      if (deleted >= toDelete) break;
     }
   }
 }
@@ -74,34 +82,55 @@ export interface IssuedChallenge {
   challenge: string;
   signatureBase64: string;
   publicKeyJwk: webcrypto.JsonWebKey;
+  keyId: string;
 }
 
 export async function issueInstitutionalChallenge(
   institutionId: string,
-  keyPair: webcrypto.CryptoKeyPair
+  keyPair: webcrypto.CryptoKeyPair,
+  keyId: string
 ): Promise<IssuedChallenge> {
+  purgeExpiredInstitutionalChallenges();
+  if (activeChallenges.size >= MAX_ACTIVE_INSTITUTIONAL_CHALLENGES) {
+    throw new CapacityExceededError('Institutional challenge capacity exceeded');
+  }
+
   const timestamp = Date.now();
   const nonce = webcrypto.randomUUID();
-  const challenge = `CHALLENGE-${nonce}-${institutionId}-${timestamp}`;
-  const challengeBuffer = new TextEncoder().encode(challenge);
-  const instSignatureBuffer = await webcrypto.subtle.sign(
-    { name: 'ECDSA', hash: { name: 'SHA-256' } },
-    keyPair.privateKey,
-    challengeBuffer
-  );
-  const publicKeyJwk = await webcrypto.subtle.exportKey('jwk', keyPair.publicKey);
-  const signatureBase64 = Buffer.from(instSignatureBuffer).toString('base64');
-
-  activeChallenges.set(challenge, {
+  const challenge = `CHALLENGE-${nonce}-${institutionId}-${timestamp}.kid.${keyId}`;
+  const reserved: ActiveChallengeRecord = {
     issuedAt: timestamp,
     consumed: false,
     inflight: false,
-    signatureBase64,
+    signatureBase64: '',
     institutionId,
-  });
-  purgeExpiredInstitutionalChallenges();
+    keyId,
+  };
+  // Reserve the slot before the first await so concurrent issuers cannot pass the cap.
+  activeChallenges.set(challenge, reserved);
 
-  return { challenge, signatureBase64, publicKeyJwk };
+  try {
+    const challengeBuffer = new TextEncoder().encode(challenge);
+    const instSignatureBuffer = await webcrypto.subtle.sign(
+      { name: 'ECDSA', hash: { name: 'SHA-256' } },
+      keyPair.privateKey,
+      challengeBuffer
+    );
+    const publicKeyJwk = await webcrypto.subtle.exportKey('jwk', keyPair.publicKey);
+    const signatureBase64 = Buffer.from(instSignatureBuffer).toString('base64');
+    reserved.signatureBase64 = signatureBase64;
+    activeChallenges.commit(challenge);
+    recordClearanceAudit({
+      event: 'challenge_issued',
+      jurisdiction: jurisdictionForInstitution(institutionId),
+      keyId,
+      reason: 'issued',
+    });
+    return { challenge, signatureBase64, publicKeyJwk, keyId };
+  } catch (err) {
+    if (!reserved.consumed) activeChallenges.delete(challenge);
+    throw err;
+  }
 }
 
 export interface ClearanceHttpResult {
@@ -113,9 +142,10 @@ function rejected(status: number, fields: Record<string, unknown>): ClearanceHtt
   return { status, body: { valid: false, ...fields } };
 }
 
-function release(record: ActiveChallengeRecord): void {
+function release(challengeId: string, record: ActiveChallengeRecord): void {
   if (!record.consumed) {
     record.inflight = false;
+    activeChallenges.commit(challengeId);
   }
 }
 
@@ -127,12 +157,34 @@ export async function verifyClearance(
   payload: unknown,
   keyPair: webcrypto.CryptoKeyPair
 ): Promise<ClearanceHttpResult> {
+  const started = performance.now();
+  const prove_ms = boundedMs(
+    payload && typeof payload === 'object' && !Buffer.isBuffer(payload)
+      ? (payload as Record<string, unknown>).proveMs
+      : undefined
+  );
+  const audit = (
+    event: 'replay_rejected' | 'proof_failure' | 'clearance_success' | 'clearance_failure',
+    reason: string,
+    extra?: { jurisdiction?: 'CH' | 'IT'; verify_ms?: number }
+  ): void => {
+    recordClearanceAudit({
+      event,
+      reason,
+      prove_ms,
+      total_ms: performance.now() - started,
+      ...extra,
+    });
+  };
+
   if (!payload || typeof payload !== 'object' || Buffer.isBuffer(payload)) {
+    audit('clearance_failure', 'invalid_payload');
     return rejected(400, { error: 'Missing required payload fields' });
   }
 
   const body = payload as Record<string, unknown>;
   if (body.v !== 1) {
+    audit('clearance_failure', 'invalid_payload');
     return rejected(400, { error: 'Invalid payload or unsupported version' });
   }
 
@@ -144,11 +196,13 @@ export async function verifyClearance(
     typeof proofBase64 !== 'string' || proofBase64.length === 0 ||
     !userPublicKey || typeof userPublicKey !== 'object'
   ) {
+    audit('clearance_failure', 'invalid_payload');
     return rejected(400, { error: 'Missing required payload fields' });
   }
 
   const jwk = userPublicKey as webcrypto.JsonWebKey;
   if (jwk.crv !== 'P-256' || jwk.kty !== 'EC') {
+    audit('clearance_failure', 'invalid_payload');
     return rejected(400, { error: 'Unsupported key type' });
   }
 
@@ -156,21 +210,26 @@ export async function verifyClearance(
   try {
     proofBytes = new Uint8Array(Buffer.from(proofBase64, 'base64'));
   } catch {
+    audit('clearance_failure', 'invalid_payload');
     return rejected(400, { error: 'Invalid base64 string' });
   }
   if (proofBytes.length === 0) {
+    audit('clearance_failure', 'invalid_payload');
     return rejected(400, { error: 'Empty proof' });
   }
 
   purgeExpiredInstitutionalChallenges();
   const record = activeChallenges.get(challengeId);
+  const jurisdiction = jurisdictionForInstitution(record?.institutionId || '');
   if (!record) {
+    audit('clearance_failure', 'challenge_not_found');
     return rejected(200, {
       reason: 'Challenge not found or untracked by institutional node',
       proofByteLength: proofBytes.length,
     });
   }
   if (record.consumed || record.inflight) {
+    audit('replay_rejected', 'challenge_consumed', { jurisdiction });
     return rejected(200, {
       reason: 'Replay detected: challenge already consumed',
       proofByteLength: proofBytes.length,
@@ -178,6 +237,7 @@ export async function verifyClearance(
   }
   if (Date.now() - record.issuedAt > CHALLENGE_TTL_MS) {
     activeChallenges.delete(challengeId);
+    audit('clearance_failure', 'challenge_expired', { jurisdiction });
     return rejected(200, {
       reason: 'Challenge expired',
       proofByteLength: proofBytes.length,
@@ -185,6 +245,7 @@ export async function verifyClearance(
   }
 
   record.inflight = true;
+  activeChallenges.commit(challengeId);
 
   const t0 = performance.now();
   try {
@@ -206,7 +267,8 @@ export async function verifyClearance(
         ['verify']
       );
     } catch {
-      release(record);
+      release(challengeId, record);
+      audit('clearance_failure', 'invalid_payload', { jurisdiction });
       return rejected(400, { error: 'Invalid JWK format', proofByteLength: proofBytes.length });
     }
 
@@ -224,7 +286,8 @@ export async function verifyClearance(
 
     const verify_ms = performance.now() - t0;
     if (!signatureOk) {
-      release(record);
+      release(challengeId, record);
+      audit('clearance_failure', 'signature_rejected', { jurisdiction, verify_ms });
       return rejected(200, {
         reason: 'Signature verification failed',
         verify_ms,
@@ -234,26 +297,32 @@ export async function verifyClearance(
 
     const age = await verifyAgeProof(proofBytes, AGE_GATE_POLICY_THRESHOLD);
     if (!age.ok) {
-      release(record);
+      release(challengeId, record);
+      const failedVerifyMs = performance.now() - t0;
+      audit('proof_failure', 'proof_rejected', { jurisdiction, verify_ms: failedVerifyMs });
       return rejected(200, {
         reason: age.reason || 'Verification failed',
-        verify_ms: performance.now() - t0,
+        verify_ms: failedVerifyMs,
         proofByteLength: proofBytes.length,
       });
     }
 
     record.consumed = true;
     record.inflight = false;
+    activeChallenges.commit(challengeId);
+    const successVerifyMs = performance.now() - t0;
+    audit('clearance_success', 'verified', { jurisdiction, verify_ms: successVerifyMs });
     return {
       status: 200,
       body: {
         valid: true,
-        verify_ms: performance.now() - t0,
+        verify_ms: successVerifyMs,
         proofByteLength: proofBytes.length,
       },
     };
   } catch (err) {
-    release(record);
+    release(challengeId, record);
+    audit('clearance_failure', 'verification_error', { jurisdiction });
     const reason = err instanceof Error ? err.message : String(err);
     return rejected(500, { error: reason });
   }

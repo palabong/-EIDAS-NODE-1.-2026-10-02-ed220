@@ -5,8 +5,9 @@
 
 import express from 'express';
 import type { webcrypto } from 'crypto';
-import { getErrorMessage } from '../httpShared.ts';
+import { CapacityExceededError, getErrorMessage } from '../httpShared.ts';
 import { issueInstitutionalChallenge, verifyClearance } from '../clearance.ts';
+import { getInstitutionalKey, jurisdictionForInstitution } from '../institutionalKey.ts';
 
 export function mountClearanceRoutes(
   app: express.Express,
@@ -19,15 +20,26 @@ export function mountClearanceRoutes(
         res.status(400).json({ error: "A valid 'institutionId' string is required." });
         return;
       }
-      const keyPair = await getInstitutionalKeyPair();
-      const issued = await issueInstitutionalChallenge(institutionId.trim(), keyPair);
+      const jurisdiction = jurisdictionForInstitution(institutionId.trim());
+      const material = await getInstitutionalKey(jurisdiction);
+      const issued = await issueInstitutionalChallenge(
+        institutionId.trim(),
+        { publicKey: material.publicKey, privateKey: material.privateKey },
+        material.keyId
+      );
       res.status(200).json({
         success: true,
         challenge: issued.challenge,
         signatureBase64: issued.signatureBase64,
         publicKeyJwk: issued.publicKeyJwk,
+        keyId: issued.keyId,
+        jurisdiction,
       });
     } catch (error: unknown) {
+      if (error instanceof CapacityExceededError) {
+        res.status(429).json({ success: false, error: error.message });
+        return;
+      }
       console.error("[Institutional Challenge] Error:", getErrorMessage(error));
       res.status(500).json({
         success: false,

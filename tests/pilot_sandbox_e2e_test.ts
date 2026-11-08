@@ -36,7 +36,23 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { createApp } from '../src/server/app.ts';
+import { createApp, activeChallenges } from '../src/server/app.ts';
+import {
+  getInstitutionalKey,
+  loadPrimaryKeyOrThrow,
+  releaseInstitutionalKey,
+  rotateInstitutionalKey
+} from '../src/server/institutionalKey.ts';
+import { FileDurableMap, durableSnapshot } from '../src/server/durableStore.ts';
+import { MAX_ACTIVE_INSTITUTIONAL_CHALLENGES, replaceInstitutionalChallengeStore } from '../src/server/clearance.ts';
+import {
+  activeWebAuthnChallenges,
+  registeredWebAuthnCredentials,
+  MAX_ACTIVE_WEBAUTHN_CHALLENGES,
+  MAX_STORED_CREDENTIALS,
+  replaceWebAuthnChallengeStore,
+  replaceWebAuthnCredentialStore
+} from '../src/server/webauthnServer.ts';
 import { 
   runPilotDemonstration, 
   runSwissDemonstration,
@@ -175,6 +191,8 @@ async function runPilotVerificationSuite() {
   const baseUrl = `http://127.0.0.1:${port}`;
   console.log(`[TEST-SERVER] Ephemeral Bilanx Pilot Node online at ${baseUrl}\n`);
 
+  const KNOWN_AUTHENTIC_UID = 'UID-9904-AUTH-951';
+
   let totalPassed = 0;
   let totalFailed = 0;
 
@@ -190,6 +208,90 @@ async function runPilotVerificationSuite() {
   }
 
   try {
+    // =========================================================================
+    // GROUP 0: Preset SAML minting is test-only
+    // =========================================================================
+    console.log('▶ [GROUP 0] Preset SAML minting is refused outside the test harness');
+
+    const lockedApp = createApp();
+    const lockedServer = createServer(lockedApp);
+    await new Promise<void>((resolve) => {
+      lockedServer.listen(0, '127.0.0.1', () => resolve());
+    });
+    const lockedUrl = `http://127.0.0.1:${(lockedServer.address() as AddressInfo).port}`;
+    try {
+      const lockedRes = await fetch(`${lockedUrl}/saml/acs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset: 'swiss_adult' })
+      });
+      const lockedBody = await lockedRes.json();
+      record(
+        lockedRes.status === 403 && lockedBody.success === false && lockedBody.sessionToken === undefined && String(lockedBody.error).includes('disabled'),
+        `0.1 Default boot rejects {preset:"swiss_adult"} (${lockedRes.status}: ${lockedBody.error})`
+      );
+    } finally {
+      lockedServer.close();
+    }
+
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    const prodFlagApp = createApp({ isTest: true });
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    const prodFlagServer = createServer(prodFlagApp);
+    await new Promise<void>((resolve) => {
+      prodFlagServer.listen(0, '127.0.0.1', () => resolve());
+    });
+    const prodFlagUrl = `http://127.0.0.1:${(prodFlagServer.address() as AddressInfo).port}`;
+    try {
+      const prodRes = await fetch(`${prodFlagUrl}/saml/acs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset: 'swiss_adult' })
+      });
+      const prodBody = await prodRes.json();
+      record(
+        prodRes.status === 403 && prodBody.success === false && String(prodBody.error).includes('disabled'),
+        `0.2 NODE_ENV=production ignores isTest and rejects {preset:"swiss_adult"} (${prodRes.status})`
+      );
+    } finally {
+      prodFlagServer.close();
+    }
+
+    const unknownPresetRes = await fetch(`${baseUrl}/saml/acs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preset: 'not-a-real-preset' })
+    });
+    const unknownPresetBody = await unknownPresetRes.json();
+    record(
+      unknownPresetRes.status === 400 &&
+      unknownPresetBody.success === false &&
+      unknownPresetBody.sessionToken === undefined &&
+      String(unknownPresetBody.error).includes('Unknown SAML preset'),
+      `0.3 Unknown preset does not fall through to a valid RSA fixture (${unknownPresetRes.status}: ${unknownPresetBody.error})`
+    );
+
+    const presetBody = JSON.stringify({ preset: 'swiss_adult' });
+    const firstMint = await fetch(`${baseUrl}/saml/acs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: presetBody
+    });
+    const secondMint = await fetch(`${baseUrl}/saml/acs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: presetBody
+    });
+    const secondMintBody = await secondMint.json();
+    record(
+      firstMint.status === 200 && secondMint.status === 200 && secondMintBody.success === true,
+      `0.4 A second swiss_adult preset is minted fresh and is not rejected as a replay (${firstMint.status}, then ${secondMint.status}: ${secondMintBody.error || 'ok'})`
+    );
+
+    console.log('  -> Group 0 passed successfully.\n');
+
     // =========================================================================
     // GROUP 1: Hardware Security Key & CTAP2 Roaming Token Integration
     // =========================================================================
@@ -317,6 +419,25 @@ async function runPilotVerificationSuite() {
       record(err.message.includes('User verification flag (UV) required'), `1.5 User verification enforcement: UV=false rejected when required (${err.message})`);
     }
 
+    // 1.5b Roaming UV is mandatory even when the caller does not ask for it.
+    const uvRoamingKey = new Ctap2HardwareKeyHarness({ aaguid: YUBIKEY_5_SERIES_AAGUID });
+    await uvRoamingKey.registerWithServer({
+      baseUrl,
+      username: 'uv-roaming-officer@bilanx.org'
+    });
+    try {
+      await uvRoamingKey.authenticateWithServer({
+        baseUrl,
+        userVerified: false
+      });
+      record(false, '1.5b Cross-platform UV=false should have been rejected without a request flag');
+    } catch (err: any) {
+      record(
+        err.message.includes('User verification flag (UV) required'),
+        `1.5b Server requires UV for cross-platform credentials regardless of the request body (${err.message})`
+      );
+    }
+
     // 1.6 ISS-03: Packed Attestation with Expired X.509 Certificate
     const expiredCertHelper = await createExpiredCertHelper();
     const expiredKey = new Ctap2HardwareKeyHarness({ aaguid: YUBIKEY_5_SERIES_AAGUID });
@@ -441,7 +562,6 @@ async function runPilotVerificationSuite() {
     const expChallengeStr = expChalData.challenge;
 
     // Mutate timestamp in challenge record to simulate expiration (>60s)
-    const { activeChallenges } = await import('../src/server/app.ts');
     const rec = activeChallenges.get(expChallengeStr);
     if (rec) {
       rec.issuedAt = Date.now() - 70_000; // 70 seconds ago (> 60s TTL)
@@ -499,6 +619,7 @@ async function runPilotVerificationSuite() {
     const swissMinorResult = await runPilotDemonstration({
       jurisdiction: 'CH_FADP',
       citizenPreset: 'minor_luca',
+      productUid: KNOWN_AUTHENTIC_UID,
       baseUrl
     });
 
@@ -544,6 +665,7 @@ async function runPilotVerificationSuite() {
     const italianMinorResult = await runPilotDemonstration({
       jurisdiction: 'IT_AGCOM',
       citizenPreset: 'it_minor_matteo',
+      productUid: KNOWN_AUTHENTIC_UID,
       baseUrl
     });
 
@@ -556,6 +678,7 @@ async function runPilotVerificationSuite() {
     const italianSubstantialResult = await runPilotDemonstration({
       jurisdiction: 'IT_AGCOM',
       citizenPreset: 'it_adult_substantial', // Giulia Bianchi, age 28, LoA substantial
+      productUid: KNOWN_AUTHENTIC_UID,
       baseUrl
     });
 
@@ -587,6 +710,7 @@ async function runPilotVerificationSuite() {
       jurisdiction: 'IT_AGCOM',
       citizenPreset: 'it_adult_high',
       useCtap2HardwareKey: true,
+      productUid: KNOWN_AUTHENTIC_UID,
       baseUrl
     });
 
@@ -599,6 +723,7 @@ async function runPilotVerificationSuite() {
       jurisdiction: 'CH_FADP',
       citizenPreset: 'swiss_adult',
       useCtap2HardwareKey: true,
+      productUid: KNOWN_AUTHENTIC_UID,
       baseUrl
     });
 
@@ -701,7 +826,688 @@ async function runPilotVerificationSuite() {
     record(recalledResult.error?.includes('[STOCK POLICY BLOCK: RECALLED STOCK]') === true, `6.4e Error details flag recalled stock block: "${recalledResult.error}"`);
     record(recalledResult.logs.some(l => l.step === 0 && l.status === 'FAIL' && l.details.includes('[STOCK POLICY BLOCK: RECALLED STOCK]')), '6.4f Audit log records Step 0 FAIL with recalled stock alert');
 
+    // 6.5 Unknown UID fails closed. The catalog's first authentic row must not be substituted.
+    const unknownUidResult = await runPilotDemonstration({
+      jurisdiction: 'CH_FADP',
+      citizenPreset: 'swiss_adult',
+      productUid: 'UID-DOES-NOT-EXIST',
+      baseUrl
+    });
+    record(unknownUidResult.success === false, '6.5a Unknown hardware UID halts the transaction');
+    record(unknownUidResult.validationStatus === 'REJECTED', '6.5b Unknown UID validation status is REJECTED');
+    record(unknownUidResult.currentStep === 0, '6.5c Halted at Step 0');
+    record(unknownUidResult.envelope === undefined, '6.5d No envelope issued for an unknown UID');
+    record(
+      unknownUidResult.error?.includes('[STOCK POLICY BLOCK: UNKNOWN UID]') === true &&
+      unknownUidResult.error?.includes('UID-9904-AUTH-951') !== true,
+      `6.5e Unknown UID is not rewritten to the default tobacco tag: "${unknownUidResult.error}"`
+    );
+
+    // 6.6 A non-OK ACS stops the pipeline before a proof or an envelope.
+    const acsFailResult = await runPilotDemonstration({
+      jurisdiction: 'CH_FADP',
+      citizenPreset: 'custom_saml',
+      customProfile: {
+        fullName: 'ACS Fail Closed',
+        dateOfBirth: '1990-01-01',
+        age: 36,
+        userId: 'CHE-BE-ACS-FAIL',
+        nationality: 'Switzerland (CHE)',
+        levelOfAssurance: 'substantial',
+        jurisdiction: 'CH'
+      },
+      productUid: KNOWN_AUTHENTIC_UID,
+      baseUrl
+    });
+    record(acsFailResult.success === false, '6.6a Non-OK ACS halts the pipeline');
+    record(acsFailResult.validationStatus === 'REJECTED', '6.6b Non-OK ACS validation status is REJECTED');
+    record(acsFailResult.currentStep === 1, `6.6c Halted at Step 1 (actual step ${acsFailResult.currentStep})`);
+    record(acsFailResult.envelope === undefined, '6.6d No envelope issued after ACS rejection');
+    record(
+      acsFailResult.error?.includes('SAML ACS rejected') === true,
+      `6.6e ACS rejection is the recorded error: "${acsFailResult.error}"`
+    );
+
     console.log('  -> Group 6 passed successfully.\n');
+
+    // =========================================================================
+    // GROUP 7: Capacity is a hard 429. Live credentials and nonces stay put.
+    // =========================================================================
+    console.log('▶ [GROUP 7] In-memory security maps refuse new entries at capacity');
+
+    const fillerCredentialIds: string[] = [];
+    const fillerWebAuthnChallenges: string[] = [];
+    const fillerInstitutionalChallenges: string[] = [];
+    try {
+      const sentinelCredentialId = 'capacity-sentinel-cred';
+      registeredWebAuthnCredentials.set(sentinelCredentialId, {
+        credentialId: sentinelCredentialId,
+        publicKeyPem: 'sentinel',
+        username: 'capacity-sentinel',
+        counter: 1,
+        createdAt: new Date().toISOString(),
+        authenticatorAttachment: 'platform'
+      });
+      let credFill = 0;
+      while (registeredWebAuthnCredentials.size < MAX_STORED_CREDENTIALS) {
+        const id = `capacity-fill-cred-${credFill++}`;
+        fillerCredentialIds.push(id);
+        registeredWebAuthnCredentials.set(id, {
+          credentialId: id,
+          publicKeyPem: 'filler',
+          username: 'capacity-filler',
+          counter: 1,
+          createdAt: new Date().toISOString(),
+          authenticatorAttachment: 'platform'
+        });
+      }
+      const credBefore = registeredWebAuthnCredentials.size;
+      const capacityKey = new Ctap2HardwareKeyHarness({ aaguid: YUBIKEY_5_SERIES_AAGUID });
+      let credStatus = 0;
+      let credError = '';
+      const recordingFetch: typeof fetch = async (input, init) => {
+        const response = await fetch(input, init);
+        if (String(input).includes('/register-verify')) credStatus = response.status;
+        return response;
+      };
+      try {
+        await capacityKey.registerWithServer({
+          baseUrl,
+          username: 'capacity-overflow@bilanx.org',
+          fetchFn: recordingFetch
+        });
+      } catch (err: any) {
+        credError = err.message;
+      }
+      record(
+        credStatus === 429 &&
+        credError.includes('capacity') &&
+        registeredWebAuthnCredentials.has(sentinelCredentialId) &&
+        registeredWebAuthnCredentials.size === credBefore,
+        `7.1 Credential store at ${credBefore} returns HTTP ${credStatus} and keeps the sentinel (${credError})`
+      );
+
+      for (const id of fillerCredentialIds) registeredWebAuthnCredentials.delete(id);
+      fillerCredentialIds.length = 0;
+      registeredWebAuthnCredentials.delete(sentinelCredentialId);
+
+      const sentinelChallenge = 'capacity-sentinel-webauthn';
+      activeWebAuthnChallenges.set(sentinelChallenge, { challenge: sentinelChallenge, issuedAt: Date.now() });
+      let waFill = 0;
+      while (activeWebAuthnChallenges.size < MAX_ACTIVE_WEBAUTHN_CHALLENGES) {
+        const id = `capacity-fill-webauthn-${waFill++}`;
+        fillerWebAuthnChallenges.push(id);
+        activeWebAuthnChallenges.set(id, { challenge: id, issuedAt: Date.now() });
+      }
+      const waBefore = activeWebAuthnChallenges.size;
+      const waRes = await fetch(`${baseUrl}/api/webauthn/register-options`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'capacity-challenge@bilanx.org' })
+      });
+      const waBody = await waRes.json();
+      record(
+        waRes.status === 429 &&
+        String(waBody.error).includes('capacity') &&
+        activeWebAuthnChallenges.has(sentinelChallenge) &&
+        activeWebAuthnChallenges.size === waBefore,
+        `7.2 WebAuthn challenge map at ${waBefore} returns 429 and keeps the sentinel (${waBody.error})`
+      );
+
+      const sentinelInstitutional = 'capacity-sentinel-institutional';
+      activeChallenges.set(sentinelInstitutional, {
+        issuedAt: Date.now(),
+        consumed: false,
+        inflight: false,
+        signatureBase64: 'sentinel',
+        institutionId: 'BILANX-CH-EIDAS-NODE-01'
+      });
+      let instFill = 0;
+      while (activeChallenges.size < MAX_ACTIVE_INSTITUTIONAL_CHALLENGES) {
+        const id = `capacity-fill-institutional-${instFill++}`;
+        fillerInstitutionalChallenges.push(id);
+        activeChallenges.set(id, {
+          issuedAt: Date.now(),
+          consumed: false,
+          inflight: false,
+          signatureBase64: 'filler',
+          institutionId: 'BILANX-CH-EIDAS-NODE-01'
+        });
+      }
+      const instBefore = activeChallenges.size;
+      const instRes = await fetch(`${baseUrl}/api/institutional-challenge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
+      });
+      const instBody = await instRes.json();
+      record(
+        instRes.status === 429 &&
+        String(instBody.error).includes('capacity') &&
+        activeChallenges.has(sentinelInstitutional) &&
+        activeChallenges.size === instBefore,
+        `7.3 Institutional nonce map at ${instBefore} returns 429 and keeps the sentinel (${instBody.error})`
+      );
+    } finally {
+      for (const id of fillerCredentialIds) registeredWebAuthnCredentials.delete(id);
+      registeredWebAuthnCredentials.delete('capacity-sentinel-cred');
+      for (const id of fillerWebAuthnChallenges) activeWebAuthnChallenges.delete(id);
+      activeWebAuthnChallenges.delete('capacity-sentinel-webauthn');
+      for (const id of fillerInstitutionalChallenges) activeChallenges.delete(id);
+      activeChallenges.delete('capacity-sentinel-institutional');
+    }
+
+    console.log('  -> Group 7 passed successfully.\n');
+
+    // =========================================================================
+    // GROUP 8: File-backed nonces, counters, and revocations survive a reload.
+    // =========================================================================
+    console.log('▶ [GROUP 8] Durable security store survives a simulated restart');
+
+    const durableDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bilanx-security-store-'));
+    const instPath = path.join(durableDir, 'institutional-challenges.json');
+    const credPath = path.join(durableDir, 'webauthn-credentials.json');
+    const chalPath = path.join(durableDir, 'webauthn-challenges.json');
+    let originalInst: ReturnType<typeof replaceInstitutionalChallengeStore> | undefined;
+    let originalCred: ReturnType<typeof replaceWebAuthnCredentialStore> | undefined;
+    let originalChal: ReturnType<typeof replaceWebAuthnChallengeStore> | undefined;
+    try {
+      const casPath = path.join(durableDir, 'cas.json');
+      const cas = new FileDurableMap<{ counter: number }>(casPath);
+      cas.set('counter-key', { counter: 1 });
+      const staleSnapshot = durableSnapshot({ counter: 1 });
+      const liveCounter = cas.get('counter-key');
+      if (liveCounter) liveCounter.counter = 2;
+      cas.commit('counter-key');
+      const staleWrite = cas.compareAndSet('counter-key', staleSnapshot, { counter: 9 });
+      const currentSnapshot = durableSnapshot(cas.get('counter-key'));
+      const freshWrite = cas.compareAndSet('counter-key', currentSnapshot, { counter: 3 });
+      const casReloaded = new FileDurableMap<{ counter: number }>(casPath);
+      record(
+        staleWrite === false && freshWrite === true && casReloaded.get('counter-key')?.counter === 3,
+        `8.1 compare-and-set keeps the newer counter across a reload (stale=${staleWrite}, fresh=${freshWrite}, counter=${casReloaded.get('counter-key')?.counter})`
+      );
+      const removed = cas.compareAndSet('counter-key', durableSnapshot(cas.get('counter-key')), null);
+      const casDeleted = new FileDurableMap<{ counter: number }>(casPath);
+      record(removed === true && casDeleted.has('counter-key') === false, '8.1b compare-and-set delete removes the entry from the file');
+
+      let corruptRefused = false;
+      try {
+        fs.writeFileSync(path.join(durableDir, 'corrupt.json'), '{not-json');
+        new FileDurableMap(path.join(durableDir, 'corrupt.json'));
+      } catch {
+        corruptRefused = true;
+      }
+      record(corruptRefused, '8.1c A corrupt security store fails closed');
+
+      originalInst = replaceInstitutionalChallengeStore(new FileDurableMap(instPath));
+      originalCred = replaceWebAuthnCredentialStore(new FileDurableMap(credPath));
+      originalChal = replaceWebAuthnChallengeStore(new FileDurableMap(chalPath));
+
+      const durableChalRes = await fetch(`${baseUrl}/api/institutional-challenge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
+      });
+      const durableChal = await durableChalRes.json();
+      const issuedReload = new FileDurableMap<{
+        issuedAt: number;
+        consumed: boolean;
+        inflight: boolean;
+        signatureBase64: string;
+        institutionId: string;
+      }>(instPath);
+      const issuedRecord = issuedReload.get(durableChal.challenge);
+      record(
+        durableChalRes.status === 200 &&
+        issuedRecord !== undefined &&
+        issuedRecord.consumed === false &&
+        issuedRecord.signatureBase64.length > 0 &&
+        issuedRecord.signatureBase64 === durableChal.signatureBase64,
+        `8.2 Issued institutional nonce and signature survive a new store on the same file (${durableChalRes.status})`
+      );
+
+      const durableProof = await generateProof(32, 18);
+      const durableDigest = await crypto.webcrypto.subtle.digest('SHA-256', durableProof);
+      const durableUserKey = await crypto.webcrypto.subtle.generateKey(
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        true,
+        ['sign', 'verify']
+      );
+      const durableFactor = 'HE-P256-DURABLE-FP';
+      const durableMsg = clearanceMessage(durableChal.challenge, durableFactor, bytesToHex(new Uint8Array(durableDigest)));
+      const durableSig = await crypto.webcrypto.subtle.sign(
+        { name: 'ECDSA', hash: { name: 'SHA-256' } },
+        durableUserKey.privateKey,
+        new TextEncoder().encode(durableMsg)
+      );
+      const durablePayload = {
+        v: 1,
+        challengeId: durableChal.challenge,
+        secondFactorHash: durableFactor,
+        userPublicKey: await crypto.webcrypto.subtle.exportKey('jwk', durableUserKey.publicKey),
+        userSignature: Buffer.from(durableSig).toString('base64url'),
+        proofBase64: bytesToBase64(durableProof),
+        institutionalSignature: durableChal.signatureBase64
+      };
+      const durableVerifyRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(durablePayload)
+      });
+      const durableVerifyBody = await durableVerifyRes.json();
+      const consumedReload = new FileDurableMap<{ consumed: boolean }>(instPath);
+      record(
+        durableVerifyBody.valid === true && consumedReload.get(durableChal.challenge)?.consumed === true,
+        `8.3 Consumed nonce is on disk after verify (valid=${durableVerifyBody.valid}, consumed=${consumedReload.get(durableChal.challenge)?.consumed})`
+      );
+
+      replaceInstitutionalChallengeStore(new FileDurableMap(instPath));
+      const restartReplayRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(durablePayload)
+      });
+      const restartReplayBody = await restartReplayRes.json();
+      record(
+        restartReplayBody.valid === false && String(restartReplayBody.reason).includes('Replay detected'),
+        `8.3b Reloaded store still rejects the consumed nonce (${restartReplayBody.reason})`
+      );
+
+      const optionsRes = await fetch(`${baseUrl}/api/webauthn/register-options`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'durable-challenge@bilanx.org', authenticatorAttachment: 'cross-platform' })
+      });
+      const optionsBody = await optionsRes.json();
+      const parkedChallenge = optionsBody.challenge as string;
+
+      const durableKey = new Ctap2HardwareKeyHarness({ aaguid: YUBIKEY_5_SERIES_AAGUID });
+      const durableReg = await durableKey.registerWithServer({
+        baseUrl,
+        username: 'durable-officer@bilanx.org'
+      });
+      const durableAuth = await durableKey.authenticateWithServer({ baseUrl });
+      const credReload = new FileDurableMap<{ counter: number; compromised?: boolean }>(credPath);
+      const chalReload = new FileDurableMap<{ challenge: string }>(chalPath);
+      const storedCred = credReload.get(durableReg.credentialId);
+      record(
+        durableAuth.verified === true &&
+        durableAuth.counter === 1 &&
+        storedCred?.counter === 1 &&
+        storedCred.compromised !== true &&
+        chalReload.size === 1 &&
+        chalReload.has(parkedChallenge),
+        `8.4 Counter is 1 on disk and the consumed WebAuthn challenges stayed consumed (counter=${storedCred?.counter}, challenges=${chalReload.size})`
+      );
+
+      let cloneRejected = false;
+      let cloneMessage = '';
+      try {
+        await durableKey.authenticateWithServer({ baseUrl, overrideCounter: 1 });
+      } catch (err: any) {
+        cloneRejected = err.message.includes('Cloned authenticator');
+        cloneMessage = err.message;
+      }
+      const revokedReload = new FileDurableMap<{ counter: number; compromised?: boolean }>(credPath);
+      record(
+        cloneRejected && revokedReload.get(durableReg.credentialId)?.compromised === true,
+        `8.5 Clone revocation survives a new store on the same file (${cloneMessage})`
+      );
+
+      activeWebAuthnChallenges.delete(parkedChallenge);
+      const chalAfterDelete = new FileDurableMap<{ challenge: string }>(chalPath);
+      record(
+        chalAfterDelete.has(parkedChallenge) === false && chalAfterDelete.size === 0,
+        `8.6 Deleting the parked WebAuthn challenge is durable (size=${chalAfterDelete.size})`
+      );
+    } finally {
+      if (originalInst) replaceInstitutionalChallengeStore(originalInst);
+      if (originalCred) replaceWebAuthnCredentialStore(originalCred);
+      if (originalChal) replaceWebAuthnChallengeStore(originalChal);
+      fs.rmSync(durableDir, { recursive: true, force: true });
+    }
+
+    console.log('  -> Group 8 passed successfully.\n');
+
+    // =========================================================================
+    // GROUP 9: Key id, Italian key, and rotation that keeps in-flight nonces.
+    // =========================================================================
+    console.log('▶ [GROUP 9] Institutional key id, Italian key, and rotation');
+
+    const ecdsaParams = { name: 'ECDSA', namedCurve: 'P-256' } as const;
+    const originalKey = await getInstitutionalKey('CH');
+    const originalPublicJwk = await crypto.webcrypto.subtle.exportKey('jwk', originalKey.publicKey);
+    const originalPrivateJwk = await crypto.webcrypto.subtle.exportKey('jwk', originalKey.privateKey);
+    const previousItJson = process.env.INSTITUTIONAL_KEY_JSON_IT;
+    const previousItKeyId = process.env.INSTITUTIONAL_KEY_ID_IT;
+    const previousKeySource = process.env.INSTITUTIONAL_KEY_SOURCE;
+    try {
+      const signedRes = await fetch(`${baseUrl}/api/institutional-challenge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
+      });
+      const signedBody = await signedRes.json();
+      const signedKey = await crypto.webcrypto.subtle.importKey(
+        'jwk',
+        signedBody.publicKeyJwk,
+        ecdsaParams,
+        true,
+        ['verify']
+      );
+      const signedOk = await crypto.webcrypto.subtle.verify(
+        { name: 'ECDSA', hash: 'SHA-256' },
+        signedKey,
+        Buffer.from(signedBody.signatureBase64, 'base64'),
+        new TextEncoder().encode(signedBody.challenge)
+      );
+      record(
+        signedRes.status === 200 &&
+        typeof signedBody.keyId === 'string' &&
+        signedBody.challenge.endsWith(`.kid.${signedBody.keyId}`) &&
+        signedOk === true &&
+        activeChallenges.get(signedBody.challenge)?.keyId === signedBody.keyId,
+        `9.1 Signed challenge carries key id ${signedBody.keyId}`
+      );
+
+      const rotatedPair = await crypto.webcrypto.subtle.generateKey(ecdsaParams, true, ['sign', 'verify']);
+      const rotated = await rotateInstitutionalKey('CH', {
+        publicKeyJwk: await crypto.webcrypto.subtle.exportKey('jwk', rotatedPair.publicKey),
+        privateKeyJwk: await crypto.webcrypto.subtle.exportKey('jwk', rotatedPair.privateKey),
+        keyId: 'ch-rotated-kid'
+      });
+      const rotatedRes = await fetch(`${baseUrl}/api/institutional-challenge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
+      });
+      const rotatedBody = await rotatedRes.json();
+      const rotatedOk = await crypto.webcrypto.subtle.verify(
+        { name: 'ECDSA', hash: 'SHA-256' },
+        rotatedPair.publicKey,
+        Buffer.from(rotatedBody.signatureBase64, 'base64'),
+        new TextEncoder().encode(rotatedBody.challenge)
+      );
+      record(
+        rotated.keyId === 'ch-rotated-kid' &&
+        rotatedBody.keyId === 'ch-rotated-kid' &&
+        rotatedBody.keyId !== signedBody.keyId &&
+        rotatedOk === true &&
+        activeChallenges.has(signedBody.challenge) &&
+        activeChallenges.get(signedBody.challenge)?.consumed === false,
+        `9.2 Rotation switches the key id and keeps the in-flight nonce (old=${signedBody.keyId}, new=${rotatedBody.keyId})`
+      );
+
+      await rotateInstitutionalKey('CH', {
+        publicKeyJwk: originalPublicJwk,
+        privateKeyJwk: originalPrivateJwk,
+        keyId: originalKey.keyId
+      });
+
+      const italianPair = await crypto.webcrypto.subtle.generateKey(ecdsaParams, true, ['sign', 'verify']);
+      const italianPublicJwk = await crypto.webcrypto.subtle.exportKey('jwk', italianPair.publicKey);
+      process.env.INSTITUTIONAL_KEY_JSON_IT = JSON.stringify({
+        publicKeyJwk: italianPublicJwk,
+        privateKeyJwk: await crypto.webcrypto.subtle.exportKey('jwk', italianPair.privateKey),
+        keyId: 'it-pilot-kid'
+      });
+      releaseInstitutionalKey('IT');
+      const italianRes = await fetch(`${baseUrl}/api/institutional-challenge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ institutionId: 'BILANX-IT-AGCOM-NODE-01' })
+      });
+      const italianBody = await italianRes.json();
+      const italianOk = await crypto.webcrypto.subtle.verify(
+        { name: 'ECDSA', hash: 'SHA-256' },
+        italianPair.publicKey,
+        Buffer.from(italianBody.signatureBase64, 'base64'),
+        new TextEncoder().encode(italianBody.challenge)
+      );
+      const swissKeyRejectsItalian = await crypto.webcrypto.subtle.verify(
+        { name: 'ECDSA', hash: 'SHA-256' },
+        originalKey.publicKey,
+        Buffer.from(italianBody.signatureBase64, 'base64'),
+        new TextEncoder().encode(italianBody.challenge)
+      );
+      record(
+        italianRes.status === 200 &&
+        italianBody.jurisdiction === 'IT' &&
+        italianBody.keyId === 'it-pilot-kid' &&
+        italianBody.challenge.endsWith('.kid.it-pilot-kid') &&
+        italianOk === true &&
+        swissKeyRejectsItalian === false,
+        `9.3 Italian institution is signed by the IT key (${italianBody.keyId})`
+      );
+
+      delete process.env.INSTITUTIONAL_KEY_JSON_IT;
+      releaseInstitutionalKey('IT');
+      const fallbackRes = await fetch(`${baseUrl}/api/institutional-challenge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ institutionId: 'BILANX-IT-AGCOM-NODE-01' })
+      });
+      const fallbackBody = await fallbackRes.json();
+      record(
+        fallbackBody.jurisdiction === 'IT' && fallbackBody.keyId === originalKey.keyId,
+        `9.3b With no IT key configured, the primary key id signs Italy (${fallbackBody.keyId})`
+      );
+
+      let missingKeyRefused = false;
+      let missingKeyMessage = '';
+      try {
+        await loadPrimaryKeyOrThrow({}, { allowEphemeral: false });
+      } catch (err: any) {
+        missingKeyRefused = err.message.includes('[FATAL]') && err.message.includes('INSTITUTIONAL_KEY_JSON');
+        missingKeyMessage = err.message;
+      }
+      record(missingKeyRefused, `9.4 Production boot without a key fails closed (${missingKeyMessage})`);
+
+      process.env.INSTITUTIONAL_KEY_SOURCE = 'kms';
+      let kmsRefused = false;
+      let kmsMessage = '';
+      try {
+        await getInstitutionalKey('CH');
+      } catch (err: any) {
+        kmsRefused = err.message.includes('InstitutionalKeySource');
+        kmsMessage = err.message;
+      }
+      delete process.env.INSTITUTIONAL_KEY_SOURCE;
+      const keyAfterKmsRefusal = await getInstitutionalKey('CH');
+      record(
+        kmsRefused && keyAfterKmsRefusal.keyId === originalKey.keyId,
+        `9.5 INSTITUTIONAL_KEY_SOURCE=kms fails closed at the adapter seam (${kmsMessage})`
+      );
+    } finally {
+      await rotateInstitutionalKey('CH', {
+        publicKeyJwk: originalPublicJwk,
+        privateKeyJwk: originalPrivateJwk,
+        keyId: originalKey.keyId
+      });
+      releaseInstitutionalKey('IT');
+      if (previousItJson === undefined) delete process.env.INSTITUTIONAL_KEY_JSON_IT;
+      else process.env.INSTITUTIONAL_KEY_JSON_IT = previousItJson;
+      if (previousItKeyId === undefined) delete process.env.INSTITUTIONAL_KEY_ID_IT;
+      else process.env.INSTITUTIONAL_KEY_ID_IT = previousItKeyId;
+      if (previousKeySource === undefined) delete process.env.INSTITUTIONAL_KEY_SOURCE;
+      else process.env.INSTITUTIONAL_KEY_SOURCE = previousKeySource;
+    }
+
+    console.log('  -> Group 9 passed successfully.\n');
+
+    // =========================================================================
+    // GROUP 10: Clearance audit log and latency summary.
+    // =========================================================================
+    console.log('▶ [GROUP 10] Clearance audit log omits PII and /api/metrics summarizes latency');
+
+    const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bilanx-audit-'));
+    const auditPath = path.join(auditDir, 'clearance-audit.log');
+    const previousAuditPath = process.env.AUDIT_LOG_PATH;
+    const sentinelFactor = 'SENTINEL-SECOND-FACTOR-HASH';
+    const sentinelName = 'Audit Sentinel Name';
+    const sentinelDob = '1900-01-01';
+    process.env.AUDIT_LOG_PATH = auditPath;
+    try {
+      const ecdsaParams = { name: 'ECDSA', namedCurve: 'P-256' } as const;
+      const signClearance = async (
+        challenge: string,
+        institutionalSignature: string,
+        proofBytes: Uint8Array,
+        proveMs: number
+      ) => {
+        const digest = await crypto.webcrypto.subtle.digest('SHA-256', proofBytes);
+        const userKey = await crypto.webcrypto.subtle.generateKey(ecdsaParams, true, ['sign', 'verify']);
+        const message = clearanceMessage(challenge, sentinelFactor, bytesToHex(new Uint8Array(digest)));
+        const signature = await crypto.webcrypto.subtle.sign(
+          { name: 'ECDSA', hash: 'SHA-256' },
+          userKey.privateKey,
+          new TextEncoder().encode(message)
+        );
+        return {
+          v: 1,
+          challengeId: challenge,
+          secondFactorHash: sentinelFactor,
+          userPublicKey: await crypto.webcrypto.subtle.exportKey('jwk', userKey.publicKey),
+          userSignature: Buffer.from(signature).toString('base64url'),
+          proofBase64: bytesToBase64(proofBytes),
+          institutionalSignature,
+          proveMs,
+          fullName: sentinelName,
+          dateOfBirth: sentinelDob
+        };
+      };
+
+      const issued = await fetch(`${baseUrl}/api/institutional-challenge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
+      }).then((res) => res.json());
+      const badProof = crypto.randomBytes(32);
+      const proofFailurePayload = await signClearance(issued.challenge, issued.signatureBase64, badProof, 15);
+      const proofFailureRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(proofFailurePayload)
+      });
+      const proofFailureBody = await proofFailureRes.json();
+
+      const successIssued = await fetch(`${baseUrl}/api/institutional-challenge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
+      }).then((res) => res.json());
+      const successProof = await generateProof(32, 18);
+      const successPayload = await signClearance(successIssued.challenge, successIssued.signatureBase64, successProof, 15);
+      const successRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(successPayload)
+      });
+      const successBody = await successRes.json();
+      const replayBody = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(successPayload)
+      }).then((res) => res.json());
+
+      await fetch(`${baseUrl}/api/institutional-challenge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ institutionId: 'BILANX-IT-AGCOM-NODE-01' })
+      });
+
+      const badAttestation = new Ctap2HardwareKeyHarness({ aaguid: YUBIKEY_5_SERIES_AAGUID });
+      let attestationRejected = false;
+      try {
+        await badAttestation.registerWithServer({
+          baseUrl,
+          username: 'audit-attestation@bilanx.org',
+          attestationFmt: 'unsupported-tpm-emulator'
+        });
+      } catch (err: any) {
+        attestationRejected = err.message.includes('Unsupported attestation format');
+      }
+
+      const cloneKey = new Ctap2HardwareKeyHarness({ aaguid: YUBIKEY_5_SERIES_AAGUID });
+      await cloneKey.registerWithServer({ baseUrl, username: 'audit-clone@bilanx.org' });
+      await cloneKey.authenticateWithServer({ baseUrl });
+      let cloneRejected = false;
+      try {
+        await cloneKey.authenticateWithServer({ baseUrl, overrideCounter: 1 });
+      } catch (err: any) {
+        cloneRejected = err.message.includes('Cloned authenticator');
+      }
+
+      const logText = fs.readFileSync(auditPath, 'utf8');
+      const logLines = logText.split('\n').filter((line) => line.trim().length > 0).map((line) => JSON.parse(line));
+      const successLine = logLines.find((line) => line.event === 'clearance_success' && line.prove_ms === 15);
+      const allowedKeys = new Set(['event', 'jurisdiction', 'prove_ms', 'verify_ms', 'total_ms', 'reason', 'keyId']);
+      const onlyAllowedKeys = logLines.every((line) => Object.keys(line).every((key) => allowedKeys.has(key)));
+      record(
+        proofFailureBody.valid === false &&
+        logLines.some((line) => line.event === 'proof_failure' && line.jurisdiction === 'CH' && line.reason === 'proof_rejected'),
+        `10.1 Proof failure is an allow-listed audit line (${proofFailureBody.reason})`
+      );
+      record(
+        successBody.valid === true &&
+        successLine?.jurisdiction === 'CH' &&
+        typeof successLine.verify_ms === 'number' &&
+        typeof successLine.total_ms === 'number' &&
+        successLine.prove_ms === 15,
+        `10.2 Clearance success logs jurisdiction and prove/verify/total milliseconds (verify_ms=${successLine?.verify_ms})`
+      );
+      record(
+        replayBody.valid === false &&
+        String(replayBody.reason).includes('Replay detected') &&
+        logLines.some((line) => line.event === 'replay_rejected' && line.jurisdiction === 'CH'),
+        `10.3 Replay rejection is logged (${replayBody.reason})`
+      );
+      record(
+        logLines.some((line) => line.event === 'challenge_issued' && line.jurisdiction === 'CH') &&
+        logLines.some((line) => line.event === 'challenge_issued' && line.jurisdiction === 'IT'),
+        '10.4 Challenge issuance logs CH and IT jurisdiction labels'
+      );
+      record(
+        attestationRejected &&
+        cloneRejected &&
+        logLines.some((line) => line.event === 'attestation_failure' && line.reason === 'attestation_rejected') &&
+        logLines.some((line) => line.event === 'clone_detected' && line.reason === 'counter_not_increasing'),
+        '10.5 Attestation failure and clone detection are logged'
+      );
+      record(
+        onlyAllowedKeys &&
+        !logText.includes(sentinelFactor) &&
+        !logText.includes(sentinelName) &&
+        !logText.includes(sentinelDob) &&
+        !logText.includes('proofBase64'),
+        '10.6 Audit lines omit the factor hash, name, date of birth, and raw proof'
+      );
+
+      const metricsRes = await fetch(`${baseUrl}/api/metrics`);
+      const metrics = await metricsRes.json();
+      const metricsText = JSON.stringify(metrics);
+      record(
+        metricsRes.status === 200 &&
+        metrics.clearance.events.clearance_success >= 1 &&
+        metrics.clearance.events.proof_failure >= 1 &&
+        metrics.clearance.events.replay_rejected >= 1 &&
+        metrics.clearance.events.clone_detected >= 1 &&
+        metrics.clearance.latency.verify_ms.count >= 1 &&
+        metrics.clearance.latency.total_ms.count >= 1 &&
+        metrics.clearance.latency.prove_ms.count >= 1 &&
+        !metricsText.includes(sentinelFactor) &&
+        !metricsText.includes(sentinelName) &&
+        !metricsText.includes(sentinelDob),
+        `10.7 /api/metrics summarizes events and latency (verify count=${metrics.clearance?.latency?.verify_ms?.count})`
+      );
+    } finally {
+      if (previousAuditPath === undefined) delete process.env.AUDIT_LOG_PATH;
+      else process.env.AUDIT_LOG_PATH = previousAuditPath;
+      fs.rmSync(auditDir, { recursive: true, force: true });
+    }
+
+    console.log('  -> Group 10 passed successfully.\n');
 
     console.log('================================================================================');
     console.log(`🏆 PILOT SANDBOX E2E SUMMARY: ${totalPassed} PASSED | ${totalFailed} FAILED (100% Pass Rate)`);

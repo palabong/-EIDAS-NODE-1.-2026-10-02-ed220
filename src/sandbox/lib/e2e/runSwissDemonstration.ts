@@ -306,10 +306,45 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
   // STEP 0: Physical Item Scan & UHF RFID Product Stock Policy Gate
   // -------------------------------------------------------------------------
   const step0Start = performance.now();
-  const rfidItem: UhdRfidAssertion = options?.rfidAssertion || (options?.productUid
-    ? DEFAULT_UHD_RFID_ASSERTIONS.find(r => r.hardwareUid === options.productUid)
-    : DEFAULT_UHD_RFID_ASSERTIONS.find(r => r.productName === options?.productScanned || r.hardwareUid === options?.productScanned))
-    || DEFAULT_UHD_RFID_ASSERTIONS[0];
+  const catalogUid = options?.productUid || options?.rfidAssertion?.hardwareUid;
+  let rfidItem: UhdRfidAssertion | undefined;
+  let stockError: string | undefined;
+  if (catalogUid) {
+    rfidItem = DEFAULT_UHD_RFID_ASSERTIONS.find(r => r.hardwareUid === catalogUid);
+    if (!rfidItem) {
+      stockError = `[STOCK POLICY BLOCK: UNKNOWN UID] Hardware UID ${catalogUid} is not in the institutional catalog.`;
+    }
+  } else if (options?.productScanned) {
+    rfidItem = DEFAULT_UHD_RFID_ASSERTIONS.find(r => r.productName === options.productScanned || r.hardwareUid === options.productScanned);
+    if (!rfidItem) {
+      stockError = '[STOCK POLICY BLOCK: UNKNOWN UID] Scanned product is not in the institutional catalog.';
+    }
+  } else {
+    stockError = '[STOCK POLICY BLOCK: MISSING UID] A product hardware UID is required.';
+  }
+
+  if (stockError || !rfidItem) {
+    const error = stockError || '[STOCK POLICY BLOCK: UNKNOWN UID] Hardware UID is not in the institutional catalog.';
+    logs.push({
+      step: 0,
+      title: 'Step 0: Physical Item Scan & RFID Check (Unknown or Missing UID)',
+      timestamp: Date.now(),
+      durationMs: Math.round(performance.now() - step0Start),
+      status: 'FAIL',
+      details: `${error} Transaction halted. No clearance envelope issued.`
+    });
+    return seal({
+      success: false,
+      validationStatus: 'REJECTED',
+      currentStep: 0,
+      totalTimeMs: Math.round(performance.now() - tStart),
+      citizen,
+      quarantinedPii,
+      hwFingerprint: '',
+      logs,
+      error
+    });
+  }
 
   if (rfidItem.status === 'counterfeit') {
     logs.push({
@@ -379,14 +414,29 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
         body: JSON.stringify(acsPayload)
       });
 
-      if (acsRes.ok) {
-        const acsData = await acsRes.json();
-        if (acsData.pos_context) {
-          citizen.age = acsData.pos_context.age ?? citizen.age;
-          if (acsData.pos_context.level_of_assurance) {
-            const rawLoa = String(acsData.pos_context.level_of_assurance).toLowerCase();
-            citizen.levelOfAssurance = rawLoa.includes('high') ? 'high' : rawLoa.includes('sub') ? 'substantial' : 'low';
+      if (!acsRes.ok) {
+        let detail = '';
+        try {
+          const failureBody = await acsRes.json();
+          if (failureBody && typeof failureBody.error === 'string') {
+            detail = failureBody.error;
           }
+        } catch {
+          detail = '';
+        }
+        throw new Error(
+          detail
+            ? `SAML ACS rejected the credential (HTTP ${acsRes.status}): ${detail}`
+            : `SAML ACS rejected the credential (HTTP ${acsRes.status}).`
+        );
+      }
+
+      const acsData = await acsRes.json();
+      if (acsData.pos_context) {
+        citizen.age = acsData.pos_context.age ?? citizen.age;
+        if (acsData.pos_context.level_of_assurance) {
+          const rawLoa = String(acsData.pos_context.level_of_assurance).toLowerCase();
+          citizen.levelOfAssurance = rawLoa.includes('high') ? 'high' : rawLoa.includes('sub') ? 'substantial' : 'low';
         }
       }
     }

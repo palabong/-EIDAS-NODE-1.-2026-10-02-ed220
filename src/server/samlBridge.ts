@@ -273,63 +273,39 @@ export async function validateSAMLResponse(
   return await validateSAMLWithPythonCLI(xmlString, expectedAudience);
 }
 
-// In-memory cache for generated fixtures to prevent process spawning storms
-const fixtureCache = new Map<string, { xml: string; expiresAt: number }>();
-
 /**
-  * Asynchronously retrieves test fixture SAML Response XML string by preset name.
-  * Non-blocking, with short-lived cache (60s) to keep timestamps fresh while avoiding event-loop starvation.
-  */
-export async function getPresetFixtureXml(presetKey: string): Promise<string> {
-  const now = Date.now();
-  const cached = fixtureCache.get(presetKey);
-  if (cached && now < cached.expiresAt) {
-    return cached.xml;
-  }
+ * Names the ACS may mint. There is no default. An unknown name must not become a valid RSA assertion.
+ * Each call spawns a fresh fixture. Caching the XML would reuse Response and Assertion IDs,
+ * and the engine would then reject the second presentation as a replay.
+ */
+const SAML_PRESET_FUNCTIONS: Record<string, string> = {
+  valid_rsa: 'get_valid_rsa_response()',
+  valid_ecdsa: 'get_valid_ecdsa_response()',
+  tampered_sig: 'get_tampered_sig_response()',
+  expired_assertion: 'get_expired_response()',
+  underage_cashier: 'get_minor_response()',
+  swiss_adult: 'get_swiss_adult_response()',
+  heinrich_keller: 'get_swiss_adult_response()',
+  eu_adult: 'get_eu_adult_response()',
+  clara_schmidt: 'get_eu_adult_response()',
+  minor_luca: 'get_minor_luca_response()',
+  luca_rossi: 'get_minor_luca_response()',
+  it_adult_high: 'get_italian_adult_response()',
+  marco_rossi: 'get_italian_adult_response()',
+  it_adult_substantial: 'get_italian_adult_substantial_response()',
+  giulia_bianchi: 'get_italian_adult_substantial_response()',
+  it_minor_matteo: 'get_italian_minor_response()',
+  matteo_russo: 'get_italian_minor_response()',
+};
 
-  let funcName = 'get_valid_rsa_response()';
-  switch (presetKey) {
-    case 'valid_rsa':
-      funcName = 'get_valid_rsa_response()';
-      break;
-    case 'valid_ecdsa':
-      funcName = 'get_valid_ecdsa_response()';
-      break;
-    case 'tampered_sig':
-      funcName = 'get_tampered_sig_response()';
-      break;
-    case 'expired_assertion':
-      funcName = 'get_expired_response()';
-      break;
-    case 'underage_cashier':
-      funcName = 'get_minor_response()';
-      break;
-    case 'swiss_adult':
-    case 'heinrich_keller':
-      funcName = 'get_swiss_adult_response()';
-      break;
-    case 'eu_adult':
-    case 'clara_schmidt':
-      funcName = 'get_eu_adult_response()';
-      break;
-    case 'minor_luca':
-    case 'luca_rossi':
-      funcName = 'get_minor_luca_response()';
-      break;
-    case 'it_adult_high':
-    case 'marco_rossi':
-      funcName = 'get_italian_adult_response()';
-      break;
-    case 'it_adult_substantial':
-    case 'giulia_bianchi':
-      funcName = 'get_italian_adult_substantial_response()';
-      break;
-    case 'it_minor_matteo':
-    case 'matteo_russo':
-      funcName = 'get_italian_minor_response()';
-      break;
-    default:
-      funcName = 'get_valid_rsa_response()';
+export function isKnownSamlPreset(presetKey: string): boolean {
+  return Object.prototype.hasOwnProperty.call(SAML_PRESET_FUNCTIONS, presetKey);
+}
+
+export async function getPresetFixtureXml(presetKey: string): Promise<string> {
+  const funcName = SAML_PRESET_FUNCTIONS[presetKey];
+  if (!funcName) {
+    return '';
   }
 
   return new Promise<string>((resolve) => {
@@ -345,12 +321,7 @@ export async function getPresetFixtureXml(presetKey: string): Promise<string> {
 
     py.on('close', (code) => {
       const trimmed = stdoutData.trim();
-      if (code === 0 && trimmed) {
-        fixtureCache.set(presetKey, { xml: trimmed, expiresAt: now + 60_000 });
-        resolve(trimmed);
-      } else {
-        resolve('');
-      }
+      resolve(code === 0 && trimmed ? trimmed : '');
     });
 
     py.on('error', () => {

@@ -100,6 +100,7 @@ async function runAdversarialTestSuite() {
     // 1.1 Complete E2E pipeline execution with Luca Rossi (age 17)
     const minorE2EResult = await runSwissDemonstration({
       citizenPreset: 'minor_luca',
+      productUid: 'UID-9904-AUTH-951',
       baseUrl
     });
     record(
@@ -202,6 +203,7 @@ async function runAdversarialTestSuite() {
     // 2.1 E2E Pipeline Hardware Fingerprint Tampering flag
     const tamperedFpResult = await runSwissDemonstration({
       citizenPreset: 'swiss_adult',
+      productUid: 'UID-9904-AUTH-951',
       baseUrl,
       tamperHardwareFingerprint: true
     });
@@ -717,6 +719,7 @@ async function runAdversarialTestSuite() {
     // Execute Swiss Adult (Heinrich Keller)
     const swissAdult = await runSwissDemonstration({
       citizenPreset: 'swiss_adult',
+      productUid: 'UID-9904-AUTH-951',
       baseUrl
     });
     const swissEnvelopeStr = JSON.stringify(swissAdult.envelope);
@@ -724,6 +727,7 @@ async function runAdversarialTestSuite() {
     // Execute EU Adult (Dr. Clara Schmidt)
     const euAdult = await runSwissDemonstration({
       citizenPreset: 'eu_adult',
+      productUid: 'UID-9904-AUTH-951',
       baseUrl
     });
     const euEnvelopeStr = JSON.stringify(euAdult.envelope);
