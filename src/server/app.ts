@@ -27,16 +27,21 @@ export {
   getInstitutionalKeyPair,
   rotateInstitutionalKey,
   releaseInstitutionalKey,
+  listPublishedInstitutionalKeys,
+  findPublishedInstitutionalKey,
+  backdateRetiredInstitutionalKey,
   jurisdictionForInstitution,
   loadPrimaryKeyOrThrow,
   type InstitutionalJurisdiction,
   type InstitutionalKeyMaterial,
   type InstitutionalKeySource,
+  type PublishedInstitutionalKey,
 } from './institutionalKey.ts';
 
 import { mountAuthRoutes } from './routes/authRoutes.ts';
 import { mountSamlRoutes } from './routes/samlRoutes.ts';
 import { mountClearanceRoutes } from './routes/clearanceRoutes.ts';
+import { mountStockRoutes } from './routes/stockRoutes.ts';
 import { mountWebAuthnRoutes } from './routes/webauthnRoutes.ts';
 
 export function validateStartupEnvironment(): void {
@@ -74,12 +79,23 @@ export function validateStartupEnvironment(): void {
  * Creates and configures the core Express application with security headers,
  * CORS policy, body parsers, and all authenticated API routes.
  */
-/** Preset SAML minting exists for harnesses only. Production ignores isTest. */
-export function samlPresetsAllowed(options?: { isTest?: boolean }): boolean {
-  return options?.isTest === true && process.env.NODE_ENV !== 'production';
+export interface CreateAppOptions {
+  /** Harness boot. Production still refuses preset minting. */
+  isTest?: boolean;
+  /**
+   * Local sandbox server (`npm run dev`). Production still refuses preset minting.
+   * A default `createApp()` leaves this off.
+   */
+  allowLocalDemoPresets?: boolean;
 }
 
-export function createApp(options?: { isTest?: boolean }): express.Express {
+/** Preset minting is for the harness and the local demo server. Production always refuses. */
+export function samlPresetsAllowed(options?: CreateAppOptions): boolean {
+  if (process.env.NODE_ENV === 'production') return false;
+  return options?.isTest === true || options?.allowLocalDemoPresets === true;
+}
+
+export function createApp(options?: CreateAppOptions): express.Express {
   const app = express();
 
   // 1. Security Headers (CSP, X-Content-Type-Options, X-Frame-Options, X-XSS-Protection)
@@ -127,6 +143,7 @@ export function createApp(options?: { isTest?: boolean }): express.Express {
   mountAuthRoutes(app);
   mountSamlRoutes(app, { allowSamlPresets: samlPresetsAllowed(options) });
   mountClearanceRoutes(app, getInstitutionalKeyPair);
+  mountStockRoutes(app);
   mountWebAuthnRoutes(app);
 
   // 404 Fallback for all unmatched /api/* routes

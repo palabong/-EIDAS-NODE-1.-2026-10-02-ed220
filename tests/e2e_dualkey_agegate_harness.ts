@@ -1,6 +1,7 @@
 import { createServer } from 'http';
 import type { AddressInfo } from 'net';
 import { createApp } from '../src/server/app.ts';
+import { globalSessionStore } from '../src/server/sessionManager.ts';
 import { runDualKeyAgeGate } from '../src/sandbox/lib/e2e/runDualKeyAgeGate.ts';
 
 async function runTests() {
@@ -34,9 +35,29 @@ async function runTests() {
   const port = (server.address() as AddressInfo).port;
   const baseUrl = `http://127.0.0.1:${port}`;
 
+  const { token: dualKeySession } = globalSessionStore.createSession({
+    uid: 'dualkey-harness',
+    email: 'verified@eidas.europa.eu',
+    name: 'eIDAS User',
+    authMethod: 'eidas_saml',
+    levelOfAssurance: 'SUBSTANTIAL',
+    isOver18: true,
+    authenticatedAt: new Date().toISOString(),
+  });
+  const withSession = (options?: RequestInit): RequestInit => {
+    const headers = new Headers(options?.headers || undefined);
+    if (!headers.has('Cookie') && !headers.has('cookie')) {
+      headers.set('Cookie', `session_token=${dualKeySession}`);
+    }
+    return { ...(options || {}), headers };
+  };
+
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
-    if (url.toString().startsWith('/api/v1/dual-key/verify')) {
+    const target = url.toString();
+    const localPath = target.startsWith(baseUrl) ? target.slice(baseUrl.length) : target;
+    const absolute = target.startsWith('/api/') ? baseUrl + target : target;
+    if (localPath.startsWith('/api/v1/dual-key/verify') || target.startsWith('/api/v1/dual-key/verify')) {
       if ((globalThis as any).__forceDualKeyVerifyFail) {
         return {
           ok: true,
@@ -44,13 +65,11 @@ async function runTests() {
           json: async () => ({ valid: false, reason: 'FORCED_FAILURE_TEST' })
         } as Response;
       }
-      return originalFetch(baseUrl + url.toString(), options);
+      return originalFetch(absolute, withSession(options));
     }
-    
-    if (url.toString().startsWith('/api/')) {
-      return originalFetch(baseUrl + url.toString(), options);
+    if (localPath.startsWith('/api/') || target.startsWith('/api/')) {
+      return originalFetch(absolute, withSession(options));
     }
-    
     if (originalFetch) return originalFetch(url, options);
     throw new Error("Unhandled fetch mock");
   };
@@ -70,7 +89,7 @@ async function runTests() {
 
     // E2
     console.log("Running E2 (age=18, T=18)...");
-    const r2 = await runDualKeyAgeGate({ age: 18, threshold: 18 });
+    const r2 = await runDualKeyAgeGate({ age: 18, threshold: 18, baseUrl });
     try {
       assertEqual(true, r2.dualKeyOk, "E2 dualKeyOk should be true");
       assertEqual(true, r2.ageGateOk, "E2 ageGateOk should be true");
@@ -85,7 +104,7 @@ async function runTests() {
 
     // E3
     console.log("Running E3 (age=40, T=18)...");
-    const r3 = await runDualKeyAgeGate({ age: 40, threshold: 18 });
+    const r3 = await runDualKeyAgeGate({ age: 40, threshold: 18, baseUrl });
     try {
       assertEqual(true, r3.dualKeyOk, "E3 dualKeyOk should be true");
       assertEqual(true, r3.ageGateOk, "E3 ageGateOk should be true");
@@ -98,7 +117,7 @@ async function runTests() {
 
     // E4
     console.log("Running E4 (Tamper test)...");
-    const r4 = await runDualKeyAgeGate({ age: 18, threshold: 18 });
+    const r4 = await runDualKeyAgeGate({ age: 18, threshold: 18, baseUrl });
     try {
       assertEqual(true, r4.ageGateOk, "E4 initial ageGateOk should be true");
       // flip one byte
@@ -120,7 +139,7 @@ async function runTests() {
     // E6
     console.log("Running E6 (Key 1 Tampered Payload / Hard Gate check)...");
     (globalThis as any).__forceDualKeyVerifyFail = true;
-    const r6 = await runDualKeyAgeGate({ age: 18, threshold: 18 });
+    const r6 = await runDualKeyAgeGate({ age: 18, threshold: 18, baseUrl });
     (globalThis as any).__forceDualKeyVerifyFail = false;
     try {
       assertEqual(false, r6.dualKeyOk, "E6 dualKeyOk should be false (hard gate)");
@@ -150,7 +169,7 @@ async function runTests() {
 
     // E7 (Anti-Replay / Single-Use Challenge Verification)
     console.log("Running E7 (Anti-Replay / Challenge Consumption check)...");
-    const r7 = await runDualKeyAgeGate({ age: 25, threshold: 18 });
+    const r7 = await runDualKeyAgeGate({ age: 25, threshold: 18, baseUrl });
     try {
       assertEqual(true, r7.dualKeyOk, "E7 first run dualKeyOk should be true");
       assertEqual(true, !!r7.payload, "E7 payload must be present");
@@ -173,6 +192,7 @@ async function runTests() {
     }
 
   } finally {
+    globalSessionStore.deleteSession(dualKeySession);
     globalThis.fetch = originalFetch;
     await new Promise<void>((resolve) => {
       server.close(() => resolve());

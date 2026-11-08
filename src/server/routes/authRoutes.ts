@@ -10,7 +10,8 @@ import {
   getAccessLogs,
   getAccessStats,
   clearAccessLogs,
-  exportAccessLogsCsv
+  exportAccessLogsCsv,
+  type AccessLog
 } from '../accessLogDb.ts';
 import {
   globalSessionStore,
@@ -19,6 +20,34 @@ import {
   clearSessionCookie
 } from '../sessionManager.ts';
 import type { SessionUser } from '../types/saml.ts';
+
+const AUDIT_OPERATOR_ROLE = 'OPERATOR';
+const AUDIT_OPERATOR_PERMISSION = 'AUDIT_LOG_ADMIN';
+const RECORDABLE_ACTIONS = new Set<AccessLog['action']>([
+  'LOGIN_SUCCESS',
+  'SESSION_VALIDATE',
+  'LOGOUT',
+  'APP_ACCESS',
+  'COMPLIANCE_RUN',
+  'LOGIN_FAILURE',
+]);
+
+/**
+ * Demo SAML sessions are CASHIER or STORE_MANAGER. High LoA adults also hold
+ * ELEVATED_AUDIT_LOG_EXPORT. Neither of those is an audit operator.
+ */
+function isAuditOperator(session: SessionUser | undefined): boolean {
+  if (!session) return false;
+  if (session.role === AUDIT_OPERATOR_ROLE) return true;
+  return Array.isArray(session.permissions) && session.permissions.includes(AUDIT_OPERATOR_PERMISSION);
+}
+
+function recordableAction(value: unknown): AccessLog['action'] {
+  if (typeof value === 'string' && RECORDABLE_ACTIONS.has(value as AccessLog['action'])) {
+    return value as AccessLog['action'];
+  }
+  return 'APP_ACCESS';
+}
 
 export function mountAuthRoutes(app: express.Express): void {
   const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -34,6 +63,14 @@ export function mountAuthRoutes(app: express.Express): void {
     }
     req.user = session;
     req.sessionToken = token;
+    next();
+  };
+
+  const requireAuditOperator = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (!isAuditOperator(req.user)) {
+      res.status(403).json({ error: "Forbidden. Audit operator role required." });
+      return;
+    }
     next();
   };
 
@@ -232,28 +269,36 @@ export function mountAuthRoutes(app: express.Express): void {
   // Record runtime user action/access event into Database
   app.post("/api/auth/record-event", async (req, res) => {
     try {
-      const { user, action, metadata } = req.body;
+      const token = extractSessionToken(req);
+      const session = token ? globalSessionStore.getSession(token) : null;
+      if (!token || !session) {
+        res.status(401).json({ error: "Unauthorized access. Valid session required." });
+        return;
+      }
+
+      const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+      const action = recordableAction(body.action);
+      const metadata = body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+        ? body.metadata as Record<string, unknown>
+        : {};
       const clientIp = getClientIp(req);
       const userAgent = req.headers['user-agent'] || 'Unknown Browser';
 
       const log = await recordAccessLog({
-        userId: user?.uid || 'guest',
-        email: user?.email || 'guest@session',
-        name: user?.name || 'Guest User',
-        picture: user?.picture,
-        authMethod: user?.uid ? 'credential_verification' : 'guest_audit',
-        action: action || 'APP_ACCESS',
+        userId: session.uid,
+        email: session.email,
+        name: session.name,
+        picture: session.picture,
+        authMethod: session.authMethod,
+        action,
         ipAddress: clientIp,
         userAgent,
         status: 'SUCCESS',
-        metadata: metadata || {}
+        metadata
       });
 
       if (action === 'LOGOUT') {
-        const token = extractSessionToken(req);
-        if (token) {
-          globalSessionStore.deleteSession(token);
-        }
+        globalSessionStore.deleteSession(token);
       }
 
       res.json({ success: true, log });
@@ -263,7 +308,7 @@ export function mountAuthRoutes(app: express.Express): void {
     }
   });
 
-  app.get("/api/access-logs", requireAuth, async (req, res) => {
+  app.get("/api/access-logs", requireAuth, requireAuditOperator, async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     try {
       const search = (req.query.search as string) || '';
@@ -292,7 +337,7 @@ export function mountAuthRoutes(app: express.Express): void {
   });
 
   // Export Access Logs to CSV
-  app.get("/api/access-logs/export", requireAuth, async (req, res) => {
+  app.get("/api/access-logs/export", requireAuth, requireAuditOperator, async (req, res) => {
     try {
       const csv = await exportAccessLogsCsv();
       res.setHeader('Content-Type', 'text/csv');
@@ -305,7 +350,7 @@ export function mountAuthRoutes(app: express.Express): void {
   });
 
   // Clear / Reset Access Logs Database
-  app.post("/api/access-logs/clear", requireAuth, async (req, res) => {
+  app.post("/api/access-logs/clear", requireAuth, requireAuditOperator, async (req, res) => {
     try {
       await clearAccessLogs();
       res.json({ success: true, message: "Access logs database cleared successfully." });

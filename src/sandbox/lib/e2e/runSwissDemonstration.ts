@@ -48,7 +48,7 @@ import {
   type PilotJurisdictionId,
   type PilotProfile 
 } from '../pilotProfiles.ts';
-import { DEFAULT_UHD_RFID_ASSERTIONS } from '../../../data.ts';
+import { receiptSha256Hex, tillClearanceArtifact, type ClearanceEnvelope } from '../../../lib/crypto/clearanceEnvelope.ts';
 import type { UhdRfidAssertion } from '../../../types.ts';
 
 export type CitizenPresetKey = 
@@ -194,6 +194,12 @@ export interface BilanxValidationEnvelope {
     exciseDutySettled: number;
     verdict: string;
   };
+  /** Server-signed clearance. The client copies it and does not mint a substitute. */
+  institutionalClearance?: {
+    envelope: ClearanceEnvelope;
+    envelopeSignature: string;
+  };
+  sessionPolicyEnforced?: boolean;
   qrPayload: string;
 }
 
@@ -248,14 +254,24 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
 
   const baseUrl = options?.baseUrl || (typeof window !== 'undefined' && window.location ? window.location.origin : '');
   const resolveUrl = (path: string) => baseUrl ? `${baseUrl.replace(/\/$/, '')}${path}` : path;
+  let samlSessionExpected = false;
   const outboundBodies: string[] = [];
   const callerFetch = options?.fetchFn || fetch;
+  const cookieJar = new Map<string, string>();
   const localFetch: typeof fetch = async (input, init) => {
     const body = init?.body;
     if (typeof body === 'string') outboundBodies.push(body);
     else if (body == null) outboundBodies.push('');
     else outboundBodies.push('[non-string body]');
-    return callerFetch(input, init);
+    const headers = new Headers(init?.headers);
+    if (cookieJar.size > 0) {
+      const jar = [...cookieJar.entries()].map(([name, value]) => `${name}=${value}`).join('; ');
+      const existing = headers.get('cookie');
+      headers.set('cookie', existing ? `${existing}; ${jar}` : jar);
+    }
+    const response = await callerFetch(input, { ...init, headers });
+    rememberCookies(response, cookieJar);
+    return response;
   };
   const seal = (
     partial: Omit<PilotDemonstrationResult, 'outboundBodies'>
@@ -304,38 +320,34 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
 
   // -------------------------------------------------------------------------
   // STEP 0: Physical Item Scan & UHF RFID Product Stock Policy Gate
+  // The institutional catalog and the manufacturer signature stay on the server.
   // -------------------------------------------------------------------------
   const step0Start = performance.now();
   const catalogUid = options?.productUid || options?.rfidAssertion?.hardwareUid;
-  let rfidItem: UhdRfidAssertion | undefined;
-  let stockError: string | undefined;
-  if (catalogUid) {
-    rfidItem = DEFAULT_UHD_RFID_ASSERTIONS.find(r => r.hardwareUid === catalogUid);
-    if (!rfidItem) {
-      stockError = `[STOCK POLICY BLOCK: UNKNOWN UID] Hardware UID ${catalogUid} is not in the institutional catalog.`;
-    }
-  } else if (options?.productScanned) {
-    rfidItem = DEFAULT_UHD_RFID_ASSERTIONS.find(r => r.productName === options.productScanned || r.hardwareUid === options.productScanned);
-    if (!rfidItem) {
-      stockError = '[STOCK POLICY BLOCK: UNKNOWN UID] Scanned product is not in the institutional catalog.';
-    }
-  } else {
-    stockError = '[STOCK POLICY BLOCK: MISSING UID] A product hardware UID is required.';
-  }
+  const stockCategories = new Set(['Tobacco', 'Alcohol', 'Vaporizer', 'Cannabinoids', 'Restricted Hardware']);
+  const unknownStockError = catalogUid
+    ? `[STOCK POLICY BLOCK: UNKNOWN UID] Hardware UID ${catalogUid} is not in the institutional catalog.`
+    : options?.productScanned
+      ? '[STOCK POLICY BLOCK: UNKNOWN UID] Scanned product is not in the institutional catalog.'
+      : '[STOCK POLICY BLOCK: MISSING UID] A product hardware UID is required.';
 
-  if (stockError || !rfidItem) {
-    const error = stockError || '[STOCK POLICY BLOCK: UNKNOWN UID] Hardware UID is not in the institutional catalog.';
+  const haltStock = (
+    error: string,
+    title: string,
+    details: string,
+    validationStatus: 'REJECTED' | 'REJECTED_COUNTERFEIT'
+  ): PilotDemonstrationResult => {
     logs.push({
       step: 0,
-      title: 'Step 0: Physical Item Scan & RFID Check (Unknown or Missing UID)',
+      title,
       timestamp: Date.now(),
       durationMs: Math.round(performance.now() - step0Start),
       status: 'FAIL',
-      details: `${error} Transaction halted. No clearance envelope issued.`
+      details
     });
     return seal({
       success: false,
-      validationStatus: 'REJECTED',
+      validationStatus,
       currentStep: 0,
       totalTimeMs: Math.round(performance.now() - tStart),
       citizen,
@@ -344,52 +356,118 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       logs,
       error
     });
+  };
+
+  let rfidItem: {
+    hardwareUid: string;
+    productName: string;
+    category: UhdRfidAssertion['category'];
+    status: 'authentic';
+    exciseRecovered: number;
+    signature: string;
+  } | undefined;
+
+  if (!catalogUid && !options?.productScanned) {
+    return haltStock(
+      unknownStockError,
+      'Step 0: Physical Item Scan & RFID Check (Unknown or Missing UID)',
+      `${unknownStockError} Transaction halted. No clearance envelope issued.`,
+      'REJECTED'
+    );
   }
 
-  if (rfidItem.status === 'counterfeit') {
-    logs.push({
-      step: 0,
-      title: 'Step 0: Physical Item Scan & RFID Check (Counterfeit Alert)',
-      timestamp: Date.now(),
-      durationMs: Math.round(performance.now() - step0Start),
-      status: 'FAIL',
-      details: `[STOCK POLICY BLOCK: COUNTERFEIT DETECTED] Product "${rfidItem.productName}" (${rfidItem.hardwareUid}) flagged with revoked/invalid manufacturer signature (${rfidItem.signature}). Transaction outcome set to REJECTED_COUNTERFEIT. Excise recovery zeroed (€0.00). POS checkout blocked.`
+  let stockDecision: {
+    ok?: boolean;
+    reason?: string;
+    signatureVerified?: boolean;
+    hardwareUid?: string;
+    productName?: string;
+    category?: string;
+    status?: string;
+    exciseRecovered?: number;
+  } | null = null;
+  try {
+    const stockRes = await localFetch(resolveUrl('/api/v1/stock/verify'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(catalogUid ? { hardwareUid: catalogUid } : { productName: options?.productScanned })
     });
-
-    return seal({
-      success: false,
-      validationStatus: 'REJECTED_COUNTERFEIT',
-      currentStep: 0,
-      totalTimeMs: Math.round(performance.now() - tStart),
-      citizen,
-      quarantinedPii,
-      hwFingerprint: '',
-      logs,
-      error: '[STOCK POLICY BLOCK: COUNTERFEIT DETECTED] Counterfeit physical product detected. Hardware UID revoked or invalid. POS checkout blocked.'
-    });
+    if (stockRes.ok) stockDecision = await stockRes.json();
+  } catch {
+    stockDecision = null;
   }
 
-  if (rfidItem.status === 'recalled') {
-    logs.push({
-      step: 0,
-      title: 'Step 0: Physical Item Scan & RFID Check (Recalled Stock Alert)',
-      timestamp: Date.now(),
-      durationMs: Math.round(performance.now() - step0Start),
-      status: 'FAIL',
-      details: `[STOCK POLICY BLOCK: RECALLED STOCK] Product "${rfidItem.productName}" (${rfidItem.hardwareUid}) flagged on institutional product safety recall list. Checkout halted by stock policy gate. Excise recovery zeroed (€0.00).`
-    });
+  if (stockDecision?.reason === 'counterfeit') {
+    const label = stockDecision.productName && stockDecision.hardwareUid
+      ? `Product "${stockDecision.productName}" (${stockDecision.hardwareUid})`
+      : 'Product';
+    return haltStock(
+      '[STOCK POLICY BLOCK: COUNTERFEIT DETECTED] Counterfeit physical product detected. Hardware UID revoked or invalid. POS checkout blocked.',
+      'Step 0: Physical Item Scan & RFID Check (Counterfeit Alert)',
+      `[STOCK POLICY BLOCK: COUNTERFEIT DETECTED] ${label} flagged with revoked/invalid manufacturer signature. Transaction outcome set to REJECTED_COUNTERFEIT. Excise recovery zeroed (€0.00). POS checkout blocked.`,
+      'REJECTED_COUNTERFEIT'
+    );
+  }
 
-    return seal({
-      success: false,
-      validationStatus: 'REJECTED',
-      currentStep: 0,
-      totalTimeMs: Math.round(performance.now() - tStart),
-      citizen,
-      quarantinedPii,
-      hwFingerprint: '',
-      logs,
-      error: '[STOCK POLICY BLOCK: RECALLED STOCK] Recalled physical product detected. Checkout halted by stock policy gate.'
-    });
+  if (stockDecision?.reason === 'recalled') {
+    const label = stockDecision.productName && stockDecision.hardwareUid
+      ? `Product "${stockDecision.productName}" (${stockDecision.hardwareUid})`
+      : 'Product';
+    return haltStock(
+      '[STOCK POLICY BLOCK: RECALLED STOCK] Recalled physical product detected. Checkout halted by stock policy gate.',
+      'Step 0: Physical Item Scan & RFID Check (Recalled Stock Alert)',
+      `[STOCK POLICY BLOCK: RECALLED STOCK] ${label} flagged on institutional product safety recall list. Checkout halted by stock policy gate. Excise recovery zeroed (€0.00).`,
+      'REJECTED'
+    );
+  }
+
+  if (stockDecision?.reason === 'signature_rejected') {
+    return haltStock(
+      '[STOCK POLICY BLOCK: MANUFACTURER SIGNATURE REJECTED] Manufacturer signature over the catalog row did not verify. POS checkout blocked.',
+      'Step 0: Physical Item Scan & RFID Check (Manufacturer Signature Rejected)',
+      '[STOCK POLICY BLOCK: MANUFACTURER SIGNATURE REJECTED] Stored manufacturer signature did not verify. Transaction halted. No clearance envelope issued.',
+      'REJECTED'
+    );
+  }
+
+  if (stockDecision?.reason === 'unsigned') {
+    return haltStock(
+      '[STOCK POLICY BLOCK: UNSIGNED PRODUCT] Manufacturer signature is missing. POS checkout blocked.',
+      'Step 0: Physical Item Scan & RFID Check (Unsigned Product)',
+      '[STOCK POLICY BLOCK: UNSIGNED PRODUCT] Manufacturer signature is missing. Transaction halted. No clearance envelope issued.',
+      'REJECTED'
+    );
+  }
+
+  const stockCategory = stockDecision?.category;
+  if (
+    stockDecision?.ok === true &&
+    stockDecision.signatureVerified === true &&
+    stockDecision.status === 'authentic' &&
+    typeof stockDecision.hardwareUid === 'string' &&
+    stockDecision.hardwareUid.length > 0 &&
+    typeof stockDecision.productName === 'string' &&
+    typeof stockCategory === 'string' &&
+    stockCategories.has(stockCategory) &&
+    typeof stockDecision.exciseRecovered === 'number'
+  ) {
+    rfidItem = {
+      hardwareUid: stockDecision.hardwareUid,
+      productName: stockDecision.productName,
+      category: stockCategory as UhdRfidAssertion['category'],
+      status: 'authentic',
+      exciseRecovered: stockDecision.exciseRecovered,
+      signature: 'ECDSA-P256'
+    };
+  }
+
+  if (!rfidItem) {
+    return haltStock(
+      unknownStockError,
+      'Step 0: Physical Item Scan & RFID Check (Unknown or Missing UID)',
+      `${unknownStockError} Transaction halted. No clearance envelope issued.`,
+      'REJECTED'
+    );
   }
 
   logs.push({
@@ -431,6 +509,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
         );
       }
 
+      samlSessionExpected = true;
       const acsData = await acsRes.json();
       if (acsData.pos_context) {
         citizen.age = acsData.pos_context.age ?? citizen.age;
@@ -672,7 +751,8 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
     dualKeyHandshakeResult = await performDualKeyHandshake(institutionId, hwFingerprint, {
       fetchFn: localFetch,
       baseUrl,
-      proofBytes: zkpProofBytes
+      proofBytes: zkpProofBytes,
+      productUid: rfidItem.hardwareUid
     });
     if (!dualKeyHandshakeResult.success) {
       throw new Error(dualKeyHandshakeResult.error || 'Clearance rejected by the institutional node');
@@ -712,6 +792,79 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
   // STEP 4: Zero Data-Liability POS Validation Envelope & Audit Receipt
   // -------------------------------------------------------------------------
   const step4Start = performance.now();
+  const serverEnvelope = dualKeyHandshakeResult.serverEnvelope;
+  const serverSignature = dualKeyHandshakeResult.envelopeSignature;
+  if (!serverEnvelope || !serverSignature || serverEnvelope.ageOver18 !== true) {
+    return seal({
+      success: false,
+      validationStatus: 'REJECTED',
+      currentStep: 4,
+      totalTimeMs: Math.round(performance.now() - tStart),
+      citizen,
+      quarantinedPii,
+      hwFingerprint,
+      logs,
+      error: 'Institutional node did not return a signed clearance envelope.'
+    });
+  }
+  if (serverEnvelope.jurisdiction !== jurisdictionKey) {
+    return seal({
+      success: false,
+      validationStatus: 'REJECTED',
+      currentStep: 4,
+      totalTimeMs: Math.round(performance.now() - tStart),
+      citizen,
+      quarantinedPii,
+      hwFingerprint,
+      logs,
+      error: 'Signed clearance envelope jurisdiction does not match the pilot profile.'
+    });
+  }
+  if (serverEnvelope.sessionAgeGatePassed !== true || serverEnvelope.loaHigh !== (jurisdictionKey === 'IT')) {
+    return seal({
+      success: false,
+      validationStatus: 'REJECTED',
+      currentStep: 4,
+      totalTimeMs: Math.round(performance.now() - tStart),
+      citizen,
+      quarantinedPii,
+      hwFingerprint,
+      logs,
+      error: 'Signed clearance envelope does not carry the session policy result.'
+    });
+  }
+  if (
+    serverEnvelope.retailSale !== true ||
+    serverEnvelope.excise !== rfidItem.exciseRecovered ||
+    serverEnvelope.productUid !== rfidItem.hardwareUid ||
+    serverEnvelope.productCategory !== rfidItem.category ||
+    serverEnvelope.productStatus !== 'authentic'
+  ) {
+    return seal({
+      success: false,
+      validationStatus: 'REJECTED',
+      currentStep: 4,
+      totalTimeMs: Math.round(performance.now() - tStart),
+      citizen,
+      quarantinedPii,
+      hwFingerprint,
+      logs,
+      error: 'Signed clearance envelope product claims do not match the verified stock row.'
+    });
+  }
+  if (samlSessionExpected && dualKeyHandshakeResult.sessionPolicyEnforced !== true) {
+    return seal({
+      success: false,
+      validationStatus: 'REJECTED',
+      currentStep: 4,
+      totalTimeMs: Math.round(performance.now() - tStart),
+      citizen,
+      quarantinedPii,
+      hwFingerprint,
+      logs,
+      error: 'SAML session was not bound to the clearance.'
+    });
+  }
   const randomSuffix = Math.floor(100000 + Math.random() * 900000).toString(16).toUpperCase();
   const envelopeId = `BILANX-${jurisdictionKey}-2026-VAL-${randomSuffix}`;
   const now = new Date();
@@ -721,26 +874,25 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
   const instSig = dualKeyHandshakeResult.payload?.institutionalSignature || 'SIG-INSTITUTIONAL';
   const instSigDigest = bytesToHex(new TextEncoder().encode(instSig)).slice(0, 16);
 
-  // Compute verifiable audit receipt hash
-  const receiptPayloadString = `${envelopeId}:${challengeId}:${instSigDigest}:${hwFingerprint}:${zkpProofDigest}:${now.toISOString()}`;
-  const auditReceiptHash = bytesToHex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(receiptPayloadString))).slice(0, 16);
+  // The till verifies this full hash under the institutional signature. The client does not truncate it.
+  const expectedReceipt = await receiptSha256Hex(serverEnvelope);
+  if (!/^[0-9a-f]{64}$/.test(serverEnvelope.receiptSha256) || serverEnvelope.receiptSha256 !== expectedReceipt) {
+    return seal({
+      success: false,
+      validationStatus: 'REJECTED',
+      currentStep: 4,
+      totalTimeMs: Math.round(performance.now() - tStart),
+      citizen,
+      quarantinedPii,
+      hwFingerprint,
+      logs,
+      error: 'Signed clearance receipt hash does not match the envelope claims.'
+    });
+  }
+  const auditReceiptHash = serverEnvelope.receiptSha256;
 
-  const qrPayloadObj = {
-    v: '1.0',
-    env: envelopeId,
-    jur: jurisdictionKey,
-    t: now.toISOString(),
-    status: 'APPROVED',
-    claims: { age18: true, loa: citizen.levelOfAssurance },
-    receipt: {
-      chId: challengeId,
-      hwFp: hwFingerprint,
-      zkp: zkpProofDigest,
-      bytes: zkpProofBytes.length,
-      auditHash: auditReceiptHash
-    }
-  };
-  const qrPayload = JSON.stringify(qrPayloadObj);
+  // The till reads these bytes. The POS wrapper around them is not the artifact.
+  const qrPayload = JSON.stringify(tillClearanceArtifact(serverEnvelope, serverSignature));
 
   const envelope: BilanxValidationEnvelope = {
     version: '1.0',
@@ -752,7 +904,7 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
     legalBasis: profile.legalBasis,
     validationStatus: 'APPROVED',
     verificationClaims: {
-      ageOver18: true,
+      ageOver18: serverEnvelope.ageOver18,
       loa: citizen.levelOfAssurance,
       issuerNode: institutionId
     },
@@ -786,6 +938,11 @@ export async function runPilotDemonstration(options?: PilotDemonstrationOptions)
       exciseDutySettled: rfidItem.exciseRecovered,
       verdict: '[OK / AUTHENTIC]'
     },
+    institutionalClearance: {
+      envelope: serverEnvelope,
+      envelopeSignature: serverSignature
+    },
+    sessionPolicyEnforced: dualKeyHandshakeResult.sessionPolicyEnforced === true,
     qrPayload
   };
 
@@ -826,6 +983,23 @@ export async function runSwissDemonstration(options?: PilotDemonstrationOptions)
 /**
  * Executes the Italian Demonstration pipeline.
  */
+function rememberCookies(response: Response, jar: Map<string, string>): void {
+  const headers = response.headers as Headers & { getSetCookie?: () => string[] };
+  const lines = typeof headers.getSetCookie === 'function' ? headers.getSetCookie() : [];
+  const fallback = lines.length === 0 ? response.headers.get('set-cookie') : null;
+  const all = lines.length > 0 ? lines : (fallback ? [fallback] : []);
+  for (const line of all) {
+    const pair = line.split(';', 1)[0];
+    const eq = pair.indexOf('=');
+    if (eq <= 0) continue;
+    const name = pair.slice(0, eq).trim();
+    const value = pair.slice(eq + 1).trim();
+    if (!name) continue;
+    if (value.length === 0) jar.delete(name);
+    else jar.set(name, value);
+  }
+}
+
 export async function runItalianDemonstration(options?: PilotDemonstrationOptions): Promise<SwissDemonstrationResult> {
   return runPilotDemonstration({
     jurisdiction: 'IT_AGCOM',

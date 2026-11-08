@@ -485,7 +485,11 @@ export function registerWebAuthnCredential(
     const attStmt = attestationMap.get('attStmt');
 
     if (attestationFormat === 'none') {
-      // Direct registration without attestation statement (WebAuthn Level 3 standard)
+      // fmt:none has no signature. The sandbox uses it for the software enclave.
+      // Production refuses it. A FIDO MDS pin is not part of this node.
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('Attestation format none is test-only');
+      }
     } else if (attestationFormat === 'packed') {
       if (!(attStmt instanceof Map)) {
         throw new Error('Packed attestation statement missing or invalid');
@@ -540,7 +544,12 @@ export function registerWebAuthnCredential(
           throw new Error(`Packed attestation certificate verification error: ${err.message}`);
         }
       } else {
-        // Self-attestation / surrogate attestation signed with the credential's own key
+        // Packed self-attestation is the sandbox software key. Production refuses it.
+        // A packed x5c chain above is checked for time and link signatures only.
+        // Pinning that chain to a manufacturer MDS root stays outside this repository.
+        if (process.env.NODE_ENV === 'production') {
+          throw new Error('Packed self-attestation is test-only');
+        }
         try {
           const verified = crypto.verify('SHA256', signedBytes, resolvedPublicKeyPem, derSig);
           if (!verified) {

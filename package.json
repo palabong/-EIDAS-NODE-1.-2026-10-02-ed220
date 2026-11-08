@@ -18,7 +18,8 @@
     "test:zkp": "npx tsx tests/b2_acceptance_harness.ts",
     "test:dualkey": "npx tsx tests/e2e_dualkey_agegate_harness.ts",
     "test:webauthn": "npx tsx tests/webauthn_e2e_test.ts",
-    "test:adversarial": "npx tsx tests/adversarial_security_stress_test.ts"
+    "test:adversarial": "npx tsx tests/adversarial_security_stress_test.ts",
+    "test:stress": "npx tsx tests/solidity_stress_test.ts"
   },
   "dependencies": {
     "@noble/curves": "^2.2.0",

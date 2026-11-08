@@ -10,12 +10,15 @@
  * INSTITUTIONAL_KEY_SOURCE=kms. No adapter is shipped. That setting fails closed
  * instead of silently signing with the local key.
  * rotateInstitutionalKey replaces one slot and does not touch the nonce store.
+ * The previous public key stays published until the clearance envelope TTL ends,
+ * so a till can still verify an envelope signed just before the rotation.
  */
 
 import fs from 'fs/promises';
 import path from 'path';
 import { webcrypto } from 'crypto';
 import { getErrorMessage } from './httpShared.ts';
+import { CLEARANCE_ENVELOPE_TTL_MS } from '../lib/crypto/clearanceEnvelope.ts';
 
 export type InstitutionalJurisdiction = 'CH' | 'IT';
 
@@ -44,6 +47,61 @@ const slots: Record<InstitutionalJurisdiction, InstitutionalKeyMaterial | null> 
   CH: null,
   IT: null,
 };
+
+/** Public verification material. `retiredAt` is absent while the key is the active signer. */
+export interface PublishedInstitutionalKey {
+  keyId: string;
+  jurisdiction: InstitutionalJurisdiction;
+  publicKey: webcrypto.CryptoKey;
+  publicKeyJwk: webcrypto.JsonWebKey;
+  retiredAt?: number;
+}
+
+const retiredKeys: PublishedInstitutionalKey[] = [];
+
+function asPublished(material: InstitutionalKeyMaterial, retiredAt?: number): PublishedInstitutionalKey {
+  const published: PublishedInstitutionalKey = {
+    keyId: material.keyId,
+    jurisdiction: material.jurisdiction,
+    publicKey: material.publicKey,
+    publicKeyJwk: material.publicKeyJwk,
+  };
+  if (retiredAt !== undefined) published.retiredAt = retiredAt;
+  return published;
+}
+
+function pruneRetiredKeys(now: number): void {
+  for (let i = retiredKeys.length - 1; i >= 0; i--) {
+    const retiredAt = retiredKeys[i].retiredAt;
+    if (retiredAt === undefined || now >= retiredAt + CLEARANCE_ENVELOPE_TTL_MS) {
+      retiredKeys.splice(i, 1);
+    }
+  }
+}
+
+function retainRetiredKey(material: InstitutionalKeyMaterial, retiredAt: number): void {
+  pruneRetiredKeys(retiredAt);
+  const published = asPublished(material, retiredAt);
+  const existing = retiredKeys.findIndex((key) => key.keyId === material.keyId);
+  if (existing >= 0) retiredKeys[existing] = published;
+  else retiredKeys.push(published);
+}
+
+function forgetRetired(keyId: string): void {
+  const existing = retiredKeys.findIndex((key) => key.keyId === keyId);
+  if (existing >= 0) retiredKeys.splice(existing, 1);
+}
+
+/**
+ * Test seam. Moves a retired key's publication time so a harness can prove
+ * the TTL cutoff without waiting. Production verification does not call this.
+ */
+export function backdateRetiredInstitutionalKey(keyId: string, retiredAt: number): boolean {
+  const found = retiredKeys.find((key) => key.keyId === keyId);
+  if (!found) return false;
+  found.retiredAt = retiredAt;
+  return true;
+}
 
 export function assertKeyId(keyId: string): string {
   if (!KEY_ID_PATTERN.test(keyId)) {
@@ -238,17 +296,53 @@ export async function getInstitutionalKeyPair(): Promise<webcrypto.CryptoKeyPair
 }
 
 /**
+ * Active verification keys plus public keys retired inside the envelope TTL.
+ * A till uses this set. Private key material is not included.
+ */
+export async function listPublishedInstitutionalKeys(now: number = Date.now()): Promise<PublishedInstitutionalKey[]> {
+  pruneRetiredKeys(now);
+  const primary = await getInstitutionalKey('CH');
+  const italian = await getInstitutionalKey('IT');
+  const current = [asPublished(primary)];
+  if (italian.keyId !== primary.keyId) current.push(asPublished(italian));
+  const seen = new Set(current.map((key) => key.keyId));
+  const published = current.slice();
+  for (const retired of retiredKeys) {
+    if (seen.has(retired.keyId)) continue;
+    seen.add(retired.keyId);
+    published.push(retired);
+  }
+  return published;
+}
+
+export async function findPublishedInstitutionalKey(
+  keyId: string,
+  now: number = Date.now()
+): Promise<PublishedInstitutionalKey | null> {
+  const published = await listPublishedInstitutionalKeys(now);
+  return published.find((key) => key.keyId === keyId) ?? null;
+}
+
+/**
  * Replace the signing key for one jurisdiction.
  * In-flight nonces stay in the challenge store. Callers keep verifying those
- * challenges with the key that signed them.
+ * challenges with the key that signed them. The outgoing public key stays
+ * published for one envelope TTL.
  */
 export async function rotateInstitutionalKey(
   jurisdiction: InstitutionalJurisdiction,
   input: { publicKeyJwk: webcrypto.JsonWebKey; privateKeyJwk: webcrypto.JsonWebKey; keyId?: string }
 ): Promise<InstitutionalKeyMaterial> {
   const material = await importMaterial(input, jurisdiction, 'rotation');
+  const outgoing = slots[jurisdiction];
+  if (outgoing && outgoing.keyId !== material.keyId) {
+    retainRetiredKey(outgoing, Date.now());
+    console.log(`[InstitutionalKey] Rotated ${jurisdiction} key to ${material.keyId}. In-flight nonces were kept. Previous public key ${outgoing.keyId} stays published for the envelope TTL.`);
+  } else {
+    console.log(`[InstitutionalKey] Rotated ${jurisdiction} key to ${material.keyId}. In-flight nonces were kept.`);
+  }
+  forgetRetired(material.keyId);
   slots[jurisdiction] = material;
-  console.log(`[InstitutionalKey] Rotated ${jurisdiction} key to ${material.keyId}. In-flight nonces were kept.`);
   return material;
 }
 

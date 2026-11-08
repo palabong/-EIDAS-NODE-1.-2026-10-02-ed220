@@ -41,10 +41,11 @@ import {
   getInstitutionalKey,
   loadPrimaryKeyOrThrow,
   releaseInstitutionalKey,
-  rotateInstitutionalKey
+  rotateInstitutionalKey,
+  backdateRetiredInstitutionalKey
 } from '../src/server/institutionalKey.ts';
 import { FileDurableMap, durableSnapshot } from '../src/server/durableStore.ts';
-import { MAX_ACTIVE_INSTITUTIONAL_CHALLENGES, replaceInstitutionalChallengeStore } from '../src/server/clearance.ts';
+import { MAX_ACTIVE_INSTITUTIONAL_CHALLENGES, credentialSecondFactorHash, replaceInstitutionalChallengeStore } from '../src/server/clearance.ts';
 import {
   activeWebAuthnChallenges,
   registeredWebAuthnCredentials,
@@ -71,6 +72,9 @@ import { buildAuditCertificatePdfDoc } from '../src/sandbox/lib/PdfReceiptGenera
 import { generateBitwiseRangeProof } from '../src/lib/crypto/zkp/range_b2.ts';
 import { generateProof } from '../src/lib/crypto/zkp/nizkp.ts';
 import { clearanceMessage } from '../src/lib/crypto/clearanceMessage.ts';
+import { acceptRetailSale, canonicalClearanceEnvelope, CLEARANCE_ENVELOPE_TTL_MS, readTillClearanceArtifact, receiptSha256Hex, signClearanceEnvelope, type ClearanceEnvelope } from '../src/lib/crypto/clearanceEnvelope.ts';
+import { getAccessLogs } from '../src/server/accessLogDb.ts';
+import { globalSessionStore } from '../src/server/sessionManager.ts';
 import { bytesToBase64, bytesToHex } from '../src/lib/crypto/encoding.ts';
 import { DEFAULT_UHD_RFID_ASSERTIONS } from '../src/data.ts';
 
@@ -179,6 +183,10 @@ async function runPilotVerificationSuite() {
   console.log('🛡️  BILANX TRL 6 OPERATIONAL PILOT SANDBOX E2E VERIFICATION SUITE');
   console.log('================================================================================\n');
 
+  const accessLogDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bilanx-pilot-access-'));
+  const previousAccessLogPath = process.env.ACCESS_LOG_PATH;
+  process.env.ACCESS_LOG_PATH = path.join(accessLogDir, 'access_logs.json');
+
   // Boot ephemeral Express server
   const app = createApp({ isTest: true });
   const server = createServer(app);
@@ -205,6 +213,207 @@ async function runPilotVerificationSuite() {
       console.error(`  ❌ [FAIL] ${message}`);
       throw new Error(`Assertion failed: ${message}`);
     }
+  }
+
+  async function assertSignedEnvelope(
+    prefix: string,
+    clearance: { envelope: ClearanceEnvelope; envelopeSignature: string } | undefined
+  ) {
+    record(
+      typeof clearance?.envelopeSignature === 'string' && clearance.envelopeSignature.length > 0,
+      `${prefix} envelope carries an institutional signature`
+    );
+    const okBody = await fetch(`${baseUrl}/api/v1/envelope/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ envelope: clearance?.envelope, envelopeSignature: clearance?.envelopeSignature }),
+    }).then((res) => res.json());
+    record(
+      okBody.valid === true && okBody.keyId === clearance?.envelope.keyId && okBody.jurisdiction === clearance?.envelope.jurisdiction,
+      `${prefix} institutional signature verifies (${okBody.reason || okBody.keyId})`
+    );
+    const forged = { ...clearance?.envelope, proofSha256: 'aa'.repeat(32) };
+    const forgedBody = await fetch(`${baseUrl}/api/v1/envelope/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ envelope: forged, envelopeSignature: clearance?.envelopeSignature }),
+    }).then((res) => res.json());
+    record(
+      forgedBody.valid === false && forgedBody.reason === 'signature_rejected',
+      `${prefix} forged envelope is rejected (${forgedBody.reason})`
+    );
+    const unsignedBody = await fetch(`${baseUrl}/api/v1/envelope/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ envelope: clearance?.envelope }),
+    }).then((res) => res.json());
+    record(
+      unsignedBody.valid === false && unsignedBody.reason === 'unsigned',
+      `${prefix} unsigned envelope is rejected (${unsignedBody.reason})`
+    );
+  }
+
+  async function sessionCookie(preset: string): Promise<string> {
+    const acs = await fetch(`${baseUrl}/saml/acs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preset }),
+    });
+    const setCookie = typeof acs.headers.getSetCookie === 'function' ? acs.headers.getSetCookie() : [];
+    const cookie = setCookie.map((line) => line.split(';', 1)[0]).join('; ');
+    if (!acs.ok || !cookie.includes('session_token=')) {
+      throw new Error(`ACS ${preset} did not set a session (${acs.status})`);
+    }
+    return cookie;
+  }
+
+  async function verifyAdultProofWithSession(preset: string, institutionId: string) {
+    const cookie = await sessionCookie(preset);
+    const issued = await fetch(`${baseUrl}/api/institutional-challenge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ institutionId }),
+    }).then((res) => res.json());
+    const proof = await generateProof(32, 18);
+    const digest = await crypto.webcrypto.subtle.digest('SHA-256', proof);
+    const factor = 'session-policy-factor';
+    const userKey = await crypto.webcrypto.subtle.generateKey(
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      true,
+      ['sign', 'verify']
+    );
+    const message = clearanceMessage(issued.challenge, factor, bytesToHex(new Uint8Array(digest)));
+    const signature = await crypto.webcrypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      userKey.privateKey,
+      new TextEncoder().encode(message)
+    );
+    const response = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({
+        v: 1,
+        challengeId: issued.challenge,
+        secondFactorHash: factor,
+        userPublicKey: await crypto.webcrypto.subtle.exportKey('jwk', userKey.publicKey),
+        userSignature: Buffer.from(signature).toString('base64url'),
+        proofBase64: bytesToBase64(proof),
+      }),
+    });
+    return response.json();
+  }
+
+  async function preparedClearanceFactor(options?: { userVerified?: boolean; overrideCounter?: number }) {
+    const key = new Ctap2HardwareKeyHarness({ aaguid: YUBIKEY_5_SERIES_AAGUID });
+    await key.registerWithServer({
+      baseUrl,
+      username: `factor-${crypto.randomUUID()}@bilanx.org`,
+    });
+    const prepared = await key.prepareAssertion({
+      baseUrl,
+      userVerified: options?.userVerified,
+      overrideCounter: options?.overrideCounter,
+    });
+    return {
+      key,
+      credentialId: prepared.credentialId,
+      assertion: prepared.assertion,
+      secondFactorHash: credentialSecondFactorHash(prepared.credentialId),
+    };
+  }
+
+  async function issueSignedClearance(
+    productUid?: string,
+    options?: { cookie?: string; factor?: Awaited<ReturnType<typeof preparedClearanceFactor>> | null; secondFactorHash?: string }
+  ) {
+    const cookie = options?.cookie !== undefined ? options.cookie : await sessionCookie('swiss_adult');
+    const factor = options?.factor === undefined ? await preparedClearanceFactor() : options.factor;
+    const issued = await fetch(`${baseUrl}/api/institutional-challenge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' }),
+    }).then((res) => res.json());
+    const proof = await generateProof(32, 18);
+    const digest = await crypto.webcrypto.subtle.digest('SHA-256', proof);
+    const secondFactorHash = options?.secondFactorHash || factor?.secondFactorHash;
+    if (!secondFactorHash) throw new Error('Clearance test is missing a second factor');
+    const userKey = await crypto.webcrypto.subtle.generateKey(
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      true,
+      ['sign', 'verify']
+    );
+    const message = clearanceMessage(issued.challenge, secondFactorHash, bytesToHex(new Uint8Array(digest)));
+    const signature = await crypto.webcrypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      userKey.privateKey,
+      new TextEncoder().encode(message)
+    );
+    const payload: Record<string, unknown> = {
+      v: 1,
+      challengeId: issued.challenge,
+      secondFactorHash,
+      userPublicKey: await crypto.webcrypto.subtle.exportKey('jwk', userKey.publicKey),
+      userSignature: Buffer.from(signature).toString('base64url'),
+      proofBase64: bytesToBase64(proof),
+    };
+    if (factor) {
+      payload.credentialId = factor.credentialId;
+      payload.webauthnAssertion = factor.assertion;
+    }
+    if (productUid !== undefined) payload.productUid = productUid;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (cookie) headers.Cookie = cookie;
+    const response = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    }).then((res) => res.json());
+    return { payload, response, cookie, factor };
+  }
+
+  function pdfPlainText(bytes: ArrayBuffer): string {
+    return Buffer.from(bytes).toString('latin1').replace(/\\([()\\])/g, '$1');
+  }
+
+  async function verifyQrWithJwks(qrPayload: string) {
+    const artifact = readTillClearanceArtifact(qrPayload);
+    const jwks = await fetch(`${baseUrl}/api/v1/jwks`).then((res) => res.json()) as {
+      keys?: Array<{ kid?: string; kty?: string; crv?: string; x?: string; y?: string; status?: string; d?: string; retiredAt?: number }>;
+    };
+    const parsed = artifact ? JSON.parse(artifact.envelope) as { keyId?: string } : {};
+    const jwk = (jwks.keys || []).find((key) => key.kid === parsed.keyId);
+    let local = false;
+    if (artifact && jwk?.kty && jwk.crv && jwk.x && jwk.y) {
+      const tillKey = await crypto.webcrypto.subtle.importKey(
+        'jwk',
+        { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y },
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        true,
+        ['verify']
+      );
+      local = await crypto.webcrypto.subtle.verify(
+        { name: 'ECDSA', hash: 'SHA-256' },
+        tillKey,
+        Buffer.from(artifact.envelopeSignature, 'base64'),
+        new TextEncoder().encode(artifact.envelope)
+      );
+    }
+    const http = artifact
+      ? await fetch(`${baseUrl}/api/v1/envelope/verify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ envelope: artifact.envelope, envelopeSignature: artifact.envelopeSignature }),
+        }).then((res) => res.json())
+      : { valid: false, reason: 'malformed' };
+    return { artifact, jwk, local, http, jwks };
+  }
+
+  async function postStock(body: Record<string, unknown>) {
+    return fetch(`${baseUrl}/api/v1/stock/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((res) => res.json());
   }
 
   try {
@@ -290,12 +499,107 @@ async function runPilotVerificationSuite() {
       `0.4 A second swiss_adult preset is minted fresh and is not rejected as a replay (${firstMint.status}, then ${secondMint.status}: ${secondMintBody.error || 'ok'})`
     );
 
+    const localDemoApp = createApp({ isTest: false, allowLocalDemoPresets: true });
+    const localDemoServer = createServer(localDemoApp);
+    await new Promise<void>((resolve) => {
+      localDemoServer.listen(0, '127.0.0.1', () => resolve());
+    });
+    const localDemoUrl = `http://127.0.0.1:${(localDemoServer.address() as AddressInfo).port}`;
+    try {
+      const localDemoRes = await fetch(`${localDemoUrl}/saml/acs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset: 'swiss_adult' })
+      });
+      const localDemoBody = await localDemoRes.json();
+      record(
+        localDemoRes.status === 200 &&
+        localDemoBody.success === true &&
+        localDemoBody.pos_context?.is_over_18 === true &&
+        localDemoBody.pos_context?.age === undefined &&
+        localDemoBody.user?.age === undefined,
+        `0.5 Local demo boot accepts {preset:"swiss_adult"} and omits numeric age (${localDemoRes.status})`
+      );
+    } finally {
+      localDemoServer.close();
+    }
+
+    const previousDemoEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    const prodDemoApp = createApp({ isTest: false, allowLocalDemoPresets: true });
+    if (previousDemoEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousDemoEnv;
+    const prodDemoServer = createServer(prodDemoApp);
+    await new Promise<void>((resolve) => {
+      prodDemoServer.listen(0, '127.0.0.1', () => resolve());
+    });
+    const prodDemoUrl = `http://127.0.0.1:${(prodDemoServer.address() as AddressInfo).port}`;
+    try {
+      const prodDemoRes = await fetch(`${prodDemoUrl}/saml/acs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset: 'swiss_adult' })
+      });
+      const prodDemoBody = await prodDemoRes.json();
+      record(
+        prodDemoRes.status === 403 && prodDemoBody.success === false && String(prodDemoBody.error).includes('disabled'),
+        `0.6 NODE_ENV=production refuses the local-demo preset flag (${prodDemoRes.status})`
+      );
+    } finally {
+      prodDemoServer.close();
+    }
+
+    const ageAcs = await fetch(`${baseUrl}/saml/acs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preset: 'swiss_adult' })
+    });
+    const ageBody = await ageAcs.json();
+    const ageSetCookie = typeof ageAcs.headers.getSetCookie === 'function' ? ageAcs.headers.getSetCookie() : [];
+    const ageCookie = ageSetCookie.map((line: string) => line.split(';', 1)[0]).join('; ');
+    const ageSessionRes = await fetch(`${baseUrl}/saml/session`, { headers: { Cookie: ageCookie } });
+    const ageSession = await ageSessionRes.json();
+    const ageLogs = await getAccessLogs({ action: 'LOGIN_SUCCESS', limit: 1 });
+    const ageLog = ageLogs.logs[0];
+    const ageAcsText = JSON.stringify(ageBody);
+    const ageSessionText = JSON.stringify(ageSession);
+    const ageLogText = JSON.stringify(ageLog || {});
+    record(
+      ageAcs.status === 200 &&
+      ageBody.user?.isOver18 === true &&
+      ageBody.pos_context?.is_over_18 === true &&
+      ageBody.user?.age === undefined &&
+      ageBody.pos_context?.age === undefined &&
+      !ageAcsText.includes('"age"') &&
+      ageSessionRes.status === 200 &&
+      ageSession.user?.isOver18 === true &&
+      ageSession.user?.age === undefined &&
+      !ageSessionText.includes('"age"') &&
+      ageLog?.metadata?.isOver18 === true &&
+      ageLog?.metadata?.age === undefined &&
+      !ageLogText.includes('"age"'),
+      '0.7 ACS response, GET /saml/session, and the access log keep isOver18 and omit numeric age'
+    );
+
     console.log('  -> Group 0 passed successfully.\n');
 
     // =========================================================================
     // GROUP 1: Hardware Security Key & CTAP2 Roaming Token Integration
     // =========================================================================
     console.log('▶ [GROUP 1] Hardware Security Key & CTAP2 Roaming Authenticator Integration');
+
+    const algOptions = await fetch(`${baseUrl}/api/webauthn/register-options`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'alg-check@bilanx.org', displayName: 'Algorithm Check' })
+    }).then((res) => res.json());
+    const advertisedAlgs = Array.isArray(algOptions.pubKeyCredParams)
+      ? algOptions.pubKeyCredParams.map((param: { alg?: number }) => param.alg)
+      : [];
+    record(
+      advertisedAlgs.length === 1 && advertisedAlgs[0] === -7,
+      `1.0 Registration advertises ES256 only (${advertisedAlgs.join(',') || 'none'})`
+    );
 
     // 1.1 Roaming Authenticator Registration with YubiKey AAGUID
     const ctap2Harness = new Ctap2HardwareKeyHarness({ aaguid: YUBIKEY_5_SERIES_AAGUID });
@@ -492,6 +796,49 @@ async function runPilotVerificationSuite() {
       record(false, '1.9 Unsupported attestation format should have been rejected');
     } catch (err: any) {
       record(err.message.includes('Unsupported attestation format'), `1.9 Fail-closed: Unsupported attestation format rejected (${err.message})`);
+
+    const noneHarness = new Ctap2HardwareKeyHarness({ aaguid: YUBIKEY_5_SERIES_AAGUID });
+    const noneReg = await noneHarness.registerWithServer({
+      baseUrl,
+      username: `fmt-none-${crypto.randomUUID()}@bilanx.org`,
+      attestationFmt: 'none'
+    });
+    record(noneReg.verified === true, '1.18 Sandbox accepts fmt none for the software enclave');
+
+    const previousAttestationEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    let noneRejected = '';
+    let selfRejected = '';
+    try {
+      try {
+        const prodNone = new Ctap2HardwareKeyHarness({ aaguid: YUBIKEY_5_SERIES_AAGUID });
+        await prodNone.registerWithServer({
+          baseUrl,
+          username: `fmt-none-prod-${crypto.randomUUID()}@bilanx.org`,
+          attestationFmt: 'none'
+        });
+      } catch (err: any) {
+        noneRejected = err.message;
+      }
+      try {
+        const prodSelf = new Ctap2HardwareKeyHarness({ aaguid: YUBIKEY_5_SERIES_AAGUID });
+        await prodSelf.registerWithServer({
+          baseUrl,
+          username: `self-prod-${crypto.randomUUID()}@bilanx.org`,
+          attestationFmt: 'packed'
+        });
+      } catch (err: any) {
+        selfRejected = err.message;
+      }
+    } finally {
+      if (previousAttestationEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousAttestationEnv;
+    }
+    record(
+      noneRejected.includes('Attestation format none is test-only') &&
+      selfRejected.includes('Packed self-attestation is test-only'),
+      `1.19 Production refuses fmt none and packed self-attestation (${noneRejected || 'accepted'} | ${selfRejected || 'accepted'})`
+    );
     }
 
     // 1.10 ISS-06: Concurrent Assertion Replay Attack Defense (Race Condition Mitigation)
@@ -503,7 +850,7 @@ async function runPilotVerificationSuite() {
     const chalData = await chalRes.json();
     const challengeStr = chalData.challenge;
 
-    const fp = 'HE-P256-CONCURRENT-FP';
+    const concurrentFactor = await preparedClearanceFactor();
     const policyProof = await generateProof(32, 18);
     const proofDigest = await crypto.webcrypto.subtle.digest('SHA-256', policyProof);
     const userKeyPair = await crypto.webcrypto.subtle.generateKey(
@@ -511,7 +858,7 @@ async function runPilotVerificationSuite() {
       true,
       ['sign', 'verify']
     );
-    const msg = clearanceMessage(challengeStr, fp, bytesToHex(new Uint8Array(proofDigest)));
+    const msg = clearanceMessage(challengeStr, concurrentFactor.secondFactorHash, bytesToHex(new Uint8Array(proofDigest)));
     const sigBuf = await crypto.webcrypto.subtle.sign(
       { name: 'ECDSA', hash: { name: 'SHA-256' } },
       userKeyPair.privateKey,
@@ -523,20 +870,24 @@ async function runPilotVerificationSuite() {
     const concurrentPayload = {
       v: 1,
       challengeId: challengeStr,
-      secondFactorHash: fp,
+      secondFactorHash: concurrentFactor.secondFactorHash,
+      credentialId: concurrentFactor.credentialId,
+      webauthnAssertion: concurrentFactor.assertion,
       userPublicKey: pubJwk,
       userSignature: sigB64,
       proofBase64: bytesToBase64(policyProof),
       institutionalSignature: chalData.signatureBase64
     };
 
+    const replayCookie = await sessionCookie('swiss_adult');
+    const replayHeaders = { 'Content-Type': 'application/json', Cookie: replayCookie };
     // Fire 5 simultaneous requests with the exact same valid payload
     const concurrentResponses = await Promise.all([
-      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
-      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
-      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
-      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
-      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: replayHeaders, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: replayHeaders, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: replayHeaders, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: replayHeaders, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: replayHeaders, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
     ]);
 
     const validCount = concurrentResponses.filter(r => r.valid === true).length;
@@ -546,7 +897,7 @@ async function runPilotVerificationSuite() {
     // 1.11 ISS-06: Replay Rejection on Subsequent Assertion
     const subsequentRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: replayHeaders,
       body: JSON.stringify(concurrentPayload)
     });
     const subsequentData = await subsequentRes.json();
@@ -569,7 +920,7 @@ async function runPilotVerificationSuite() {
 
     const expVerifyRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: replayHeaders,
       body: JSON.stringify({
         ...concurrentPayload,
         challengeId: expChallengeStr
@@ -577,6 +928,56 @@ async function runPilotVerificationSuite() {
     });
     const expVerifyData = await expVerifyRes.json();
     record(expVerifyData.valid === false && (expVerifyData.reason?.includes('expired') || expVerifyData.reason?.includes('not found or untracked')), `1.12 ISS-06: Challenge TTL expiration and pruning enforced (${expVerifyData.reason})`);
+
+    const boundClearance = await issueSignedClearance();
+    record(
+      boundClearance.response.valid === true &&
+      boundClearance.factor?.secondFactorHash === boundClearance.response.envelope?.secondFactorHash &&
+      boundClearance.response.envelope?.secondFactorHash === credentialSecondFactorHash(boundClearance.factor?.credentialId || ''),
+      '1.13 Signed second factor is the hash of the credential the server just verified'
+    );
+    const unbound = await issueSignedClearance(undefined, { factor: null, secondFactorHash: 'client-chosen-factor' });
+    const unboundText = JSON.stringify(unbound.response);
+    record(
+      unbound.response.valid === false &&
+      unbound.response.reason === 'Second factor is not bound to a verified authenticator' &&
+      unbound.response.envelope === undefined &&
+      !unboundText.includes('client-chosen-factor'),
+      `1.14 A client-chosen second factor is rejected (${unbound.response.reason})`
+    );
+    const mismatchedFactor = await preparedClearanceFactor();
+    const mismatched = await issueSignedClearance(undefined, {
+      factor: mismatchedFactor,
+      secondFactorHash: 'ab'.repeat(32),
+    });
+    record(
+      mismatched.response.valid === false &&
+      mismatched.response.reason === 'Second factor hash does not match the verified credential' &&
+      mismatched.response.envelope === undefined,
+      `1.15 Second factor hash must match the verified credential (${mismatched.response.reason})`
+    );
+    const uvFactor = await preparedClearanceFactor({ userVerified: false });
+    const uvRejected = await issueSignedClearance(undefined, { factor: uvFactor });
+    record(
+      uvRejected.response.valid === false &&
+      String(uvRejected.response.reason).includes('User verification flag (UV) required'),
+      `1.16 Roaming clearance without UV is rejected (${uvRejected.response.reason})`
+    );
+    const counted = await issueSignedClearance();
+    const clonedAssertion = await counted.factor!.key.prepareAssertion({ baseUrl, overrideCounter: 1 });
+    const cloned = await issueSignedClearance(undefined, {
+      factor: {
+        ...counted.factor!,
+        assertion: clonedAssertion.assertion,
+        credentialId: clonedAssertion.credentialId,
+      },
+    });
+    record(
+      counted.response.valid === true &&
+      cloned.response.valid === false &&
+      String(cloned.response.reason).includes('Cloned authenticator'),
+      `1.17 Clearance keeps the roaming counter monotonic (${cloned.response.reason})`
+    );
 
     console.log('  -> Group 1 passed successfully.\n');
 
@@ -609,11 +1010,68 @@ async function runPilotVerificationSuite() {
     record(swissAdultResult.envelope?.cryptographicReceipt.proofByteLength === 1355, '2.1h Certified canonical 1,355-byte NIST P-256 B2 Sigma range proof');
     record(swissAdultResult.totalTimeMs < SWISS_PILOT_PROFILE.targetMaxLatencyMs, `2.1i Execution within sub-1.5s POS envelope: ${swissAdultResult.totalTimeMs} ms < 1500 ms`);
     record(swissAdultResult.envelope?.merchantClearance.complianceRebateChf === 0.15, '2.1j Swiss excise duty rebate credited (CHF 0.15)');
+    record(swissAdultResult.envelope?.sessionPolicyEnforced === true, '2.1k SAML session was enforced on the Swiss clearance');
+    const swissSignedPolicy = swissAdultResult.envelope?.institutionalClearance?.envelope;
+    record(
+      swissSignedPolicy?.sessionAgeGatePassed === true &&
+      swissSignedPolicy?.loaHigh === false &&
+      swissSignedPolicy?.jurisdiction === 'CH' &&
+      swissSignedPolicy?.retailSale === true &&
+      swissSignedPolicy?.excise === 3.85 &&
+      acceptRetailSale(swissSignedPolicy) === true &&
+      !Object.prototype.hasOwnProperty.call(swissSignedPolicy || {}, 'age'),
+      '2.1n Signed Swiss envelope records the age gate, the retail sale, and the catalog excise'
+    );
+    await assertSignedEnvelope('2.1l', swissAdultResult.envelope?.institutionalClearance);
+    const chKey = await getInstitutionalKey('CH');
+    const expired = await signClearanceEnvelope({
+      keyId: chKey.keyId,
+      jurisdiction: 'CH',
+      proofSha256: 'ab'.repeat(32),
+      secondFactorHash: 'cd'.repeat(32),
+      iat: Date.now() - 10 * 60 * 1000,
+      exp: Date.now() - 1000,
+    }, chKey.privateKey);
+    const expiredBody = await fetch(`${baseUrl}/api/v1/envelope/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(expired),
+    }).then((res) => res.json());
+    record(expiredBody.valid === false && expiredBody.reason === 'expired', `2.1m Expired clearance envelope is rejected (${expiredBody.reason})`);
 
     // 2.2 Swiss Audit Certificate PDF Export
     const swissPdf = buildAuditCertificatePdfDoc(swissAdultResult.envelope!, swissAdultResult.citizen);
     const swissPdfBytes = swissPdf.output('arraybuffer');
+    const swissPdfText = pdfPlainText(swissPdfBytes);
     record(swissPdfBytes.byteLength > 2000, `2.2 Swiss FADP audit certificate PDF compiled (${swissPdfBytes.byteLength} bytes)`);
+    record(!swissPdfText.includes('(eIDAS HIGH)'), '2.2b Swiss PDF does not label the session as eIDAS HIGH');
+    record(swissPdfText.includes('UID-7701-AUTH-118'), '2.2c Swiss PDF contains the verified product UID');
+    record(
+      swissPdfText.includes(swissAdultResult.envelope?.cryptographicReceipt.auditReceiptHash || 'missing-hash'),
+      '2.2d Swiss PDF contains the full receipt hash'
+    );
+    const swissCanonical = swissSignedPolicy ? canonicalClearanceEnvelope(swissSignedPolicy) : '';
+    record(
+      swissCanonical.length > 0 && swissPdfText.includes(swissCanonical),
+      '2.2e Swiss PDF renders the canonical signed envelope'
+    );
+    const swissQr = readTillClearanceArtifact(swissAdultResult.envelope?.qrPayload);
+    record(
+      swissQr?.envelope === swissCanonical &&
+      swissQr.envelopeSignature === swissAdultResult.envelope?.institutionalClearance?.envelopeSignature,
+      '2.4a QR carries the canonical envelope and its signature'
+    );
+    const swissTill = await verifyQrWithJwks(swissAdultResult.envelope?.qrPayload || '');
+    record(
+      swissTill.jwk?.status === 'active' && swissTill.jwk?.d === undefined && swissTill.local === true,
+      `2.4b A till verifies the QR with the JWKS public key (${swissTill.jwk?.kid || 'missing'})`
+    );
+    record(
+      swissTill.http?.valid === true && swissTill.http?.keyId === swissSignedPolicy?.keyId,
+      `2.4c Envelope verify accepts the QR bytes alone (${swissTill.http?.reason || swissTill.http?.keyId})`
+    );
+    const dirtyQr = JSON.stringify({ ...JSON.parse(swissAdultResult.envelope?.qrPayload || '{}'), fullName: 'Heinrich Keller' });
+    record(readTillClearanceArtifact(dirtyQr) === null, '2.4d QR reader rejects fields outside the signed artifact');
 
     // 2.3 Swiss Underage Minor Rejection (Luca Rossi, age 17)
     const swissMinorResult = await runPilotDemonstration({
@@ -654,12 +1112,62 @@ async function runPilotVerificationSuite() {
     record(italianAdultResult.envelope?.jurisdiction === 'IT', '3.1d Envelope jurisdiction is IT (Italy)');
     record(italianAdultResult.envelope?.verificationClaims.issuerNode === 'BILANX-IT-AGCOM-NODE-01', '3.1e Bound to institutional Italian node (BILANX-IT-AGCOM-NODE-01)');
     record(italianAdultResult.envelope?.merchantClearance.complianceCredit?.currency === 'EUR', '3.1f Compliance credit issued in EUR (EUR 0.20)');
-    record(Boolean(italianAdultResult.envelope?.cryptographicReceipt.auditReceiptHash), `3.1g Verifiable AgCom audit receipt hash produced: ${italianAdultResult.envelope?.cryptographicReceipt.auditReceiptHash}`);
+    const italianReceipt = italianAdultResult.envelope?.cryptographicReceipt.auditReceiptHash;
+    const italianSigned = italianAdultResult.envelope?.institutionalClearance?.envelope;
+    const italianTill = italianSigned ? await receiptSha256Hex(italianSigned) : '';
+    record(
+      typeof italianReceipt === 'string' && italianReceipt.length === 64 && italianReceipt === italianSigned?.receiptSha256 && italianReceipt === italianTill,
+      `3.1g Full receipt SHA-256 is covered by the institutional signature: ${italianReceipt}`
+    );
+    record(italianAdultResult.envelope?.sessionPolicyEnforced === true, '3.1h SAML session was enforced on the Italian clearance');
+    record(
+      italianSigned?.sessionAgeGatePassed === true &&
+      italianSigned?.loaHigh === true &&
+      italianSigned?.jurisdiction === 'IT' &&
+      italianSigned?.retailSale === true &&
+      italianSigned?.excise === 0 &&
+      acceptRetailSale(italianSigned) === true &&
+      !Object.prototype.hasOwnProperty.call(italianSigned || {}, 'age'),
+      '3.1k Signed Italian envelope records the age gate, LoA High, and a zero catalog excise'
+    );
+    await assertSignedEnvelope('3.1i', italianAdultResult.envelope?.institutionalClearance);
+    const italianCanonical = italianSigned ? canonicalClearanceEnvelope(italianSigned) : '';
+    const italianQr = readTillClearanceArtifact(italianAdultResult.envelope?.qrPayload);
+    record(
+      italianQr?.envelope === italianCanonical && (italianQr?.envelopeSignature.length || 0) > 0,
+      '3.1l Italian QR carries the canonical envelope and its signature'
+    );
+    record(
+      italianAdultResult.totalTimeMs < ITALIAN_PILOT_PROFILE.targetMaxLatencyMs,
+      `3.1j Italian path within POS budget: ${italianAdultResult.totalTimeMs} ms < ${ITALIAN_PILOT_PROFILE.targetMaxLatencyMs} ms`
+    );
 
     // 3.2 Italian Audit Certificate PDF Export
     const italianPdf = buildAuditCertificatePdfDoc(italianAdultResult.envelope!, italianAdultResult.citizen);
     const italianPdfBytes = italianPdf.output('arraybuffer');
+    const italianPdfText = pdfPlainText(italianPdfBytes);
+    const italianSignature = italianAdultResult.envelope?.institutionalClearance?.envelopeSignature || '';
     record(italianPdfBytes.byteLength > 2000, `3.2 Italian AgCom audit certificate PDF compiled (${italianPdfBytes.byteLength} bytes)`);
+    record(italianPdfText.includes('UID-4408-AUTH-018'), '3.2b PDF contains the verified Italian product UID');
+    record(italianPdfText.includes('Restricted Hardware'), '3.2c PDF contains the verified category');
+    record(italianPdfText.includes('[OK / AUTHENTIC]'), '3.2d PDF contains the authentic verdict');
+    record(typeof italianReceipt === 'string' && italianPdfText.includes(italianReceipt), '3.2e PDF contains the full receipt hash');
+    record(italianCanonical.length > 0 && italianPdfText.includes(italianCanonical), '3.2j Italian PDF renders the canonical signed envelope');
+    record(italianSignature.length > 0 && italianPdfText.includes(italianSignature), '3.2f PDF contains the institutional signature');
+    record(italianPdfText.includes('(eIDAS HIGH)'), '3.2g Italian High session PDF states eIDAS HIGH');
+    record(!italianPdfText.includes('UID-9904-AUTH-951'), '3.2h PDF does not fall back to the tobacco UID');
+    const substantialPdf = buildAuditCertificatePdfDoc({
+      ...italianAdultResult.envelope!,
+      verificationClaims: {
+        ...italianAdultResult.envelope!.verificationClaims,
+        loa: 'substantial'
+      }
+    }, italianAdultResult.citizen);
+    const substantialPdfText = pdfPlainText(substantialPdf.output('arraybuffer'));
+    record(
+      substantialPdfText.includes('SUBSTANTIAL') && !substantialPdfText.includes('(eIDAS HIGH)'),
+      '3.2i A substantial LoA PDF does not carry the High suffix'
+    );
 
     // 3.3 Italian Underage Minor Rejection (Matteo Russo, age 16)
     const italianMinorResult = await runPilotDemonstration({
@@ -698,6 +1206,65 @@ async function runPilotVerificationSuite() {
       itProverError = err.message;
     }
     record(itProverError === 'Age 16 is not within [T, T+255] for T=18', `3.5 Italian minor (16yo) direct prover infeasibility: "${itProverError}"`);
+
+    const substantialSession = await verifyAdultProofWithSession('it_adult_substantial', 'BILANX-IT-AGCOM-NODE-01');
+    const substantialText = JSON.stringify(substantialSession);
+    record(
+      substantialSession.valid === false &&
+      substantialSession.reason === 'Italian LoA High is required' &&
+      substantialSession.envelope === undefined &&
+      !substantialText.includes('Giulia') &&
+      !substantialText.includes('Bianchi'),
+      `3.6 Server rejects LoA Substantial when the Italian session cookie is present (${substantialSession.reason})`
+    );
+    const underageSession = await verifyAdultProofWithSession('minor_luca', 'BILANX-CH-EIDAS-NODE-01');
+    const underageText = JSON.stringify(underageSession);
+    record(
+      underageSession.valid === false &&
+      underageSession.reason === 'Session age gate rejected the clearance' &&
+      underageSession.envelope === undefined &&
+      !underageText.includes('Luca') &&
+      !Object.prototype.hasOwnProperty.call(underageSession, 'age'),
+      `3.7 Server rejects an underage session even when the proof is an adult proof (${underageSession.reason})`
+    );
+
+    const missingSession = await issueSignedClearance(undefined, { cookie: '' });
+    const missingSessionText = JSON.stringify(missingSession.response);
+    record(
+      missingSession.response.valid === false &&
+      missingSession.response.reason === 'Session is required' &&
+      missingSession.response.envelope === undefined &&
+      !Object.prototype.hasOwnProperty.call(missingSession.response, 'age') &&
+      !missingSessionText.includes('Heinrich') &&
+      !missingSessionText.includes('1994-05-12'),
+      `3.8 Clearance without a session cookie is rejected (${missingSession.response.reason})`
+    );
+    const recoveredSession = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: await sessionCookie('swiss_adult') },
+      body: JSON.stringify(missingSession.payload),
+    }).then((res) => res.json());
+    const recoveredText = JSON.stringify(recoveredSession);
+    record(
+      recoveredSession.valid === true &&
+      recoveredSession.envelope?.sessionAgeGatePassed === true &&
+      recoveredSession.envelope?.loaHigh === false &&
+      recoveredSession.envelope?.jurisdiction === 'CH' &&
+      !Object.prototype.hasOwnProperty.call(recoveredSession, 'age') &&
+      !Object.prototype.hasOwnProperty.call(recoveredSession.envelope || {}, 'age') &&
+      !recoveredText.includes('Heinrich'),
+      '3.8b The same proof succeeds once a resolved session is presented, and the policy is signed'
+    );
+    const bogusSession = await issueSignedClearance(undefined, { cookie: 'session_token=not-a-session' });
+    const bogusText = JSON.stringify(bogusSession.response);
+    record(
+      bogusSession.response.valid === false &&
+      bogusSession.response.reason === 'Session is missing or expired' &&
+      bogusSession.response.envelope === undefined &&
+      !Object.prototype.hasOwnProperty.call(bogusSession.response, 'age') &&
+      !bogusText.includes('Heinrich'),
+      `3.9 An unresolved session cookie is rejected (${bogusSession.response.reason})`
+    );
 
     console.log('  -> Group 3 passed successfully.\n');
 
@@ -749,6 +1316,42 @@ async function runPilotVerificationSuite() {
     record(italianAdultResult.envelope?.merchantClearance.piiTransmittedBytes === 0, '5.4 Italian Merchant clearance certifies 0 bytes PII');
     record(swissAdultResult.envelope?.merchantClearance.gdprLiabilityRisk === 'ZERO_LIABILITY', '5.5 Swiss GDPR liability risk confirmed ZERO_LIABILITY');
     record(italianAdultResult.envelope?.merchantClearance.gdprLiabilityRisk === 'ZERO_LIABILITY', '5.6 Italian GDPR liability risk confirmed ZERO_LIABILITY');
+    await assertSignedEnvelope('5.7', swissAdultResult.envelope?.institutionalClearance);
+    await assertSignedEnvelope('5.8', italianAdultResult.envelope?.institutionalClearance);
+    const envelopeKeys = ['ageOver18', 'excise', 'exp', 'iat', 'jurisdiction', 'keyId', 'loaHigh', 'productCategory', 'productStatus', 'productUid', 'proofSha256', 'receiptSha256', 'retailSale', 'secondFactorHash', 'sessionAgeGatePassed', 'v'];
+    const swissKeys = Object.keys(swissAdultResult.envelope?.institutionalClearance?.envelope || {}).sort();
+    const italianKeys = Object.keys(italianAdultResult.envelope?.institutionalClearance?.envelope || {}).sort();
+    record(
+      swissKeys.join(',') === envelopeKeys.join(',') && italianKeys.join(',') === envelopeKeys.join(','),
+      '5.9 Signed clearance envelope fields stay on the allow-list'
+    );
+    const swissPolicyEnvelope = swissAdultResult.envelope?.institutionalClearance?.envelope;
+    const { sessionAgeGatePassed: droppedPolicy, ...strippedPolicy } = swissPolicyEnvelope || {};
+    const strippedPolicyBody = await fetch(`${baseUrl}/api/v1/envelope/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        envelope: strippedPolicy,
+        envelopeSignature: swissAdultResult.envelope?.institutionalClearance?.envelopeSignature,
+      }),
+    }).then((res) => res.json());
+    const rewrittenPolicy = { ...swissPolicyEnvelope, jurisdiction: 'IT', loaHigh: true };
+    const rewrittenPolicyBody = await fetch(`${baseUrl}/api/v1/envelope/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        envelope: rewrittenPolicy,
+        envelopeSignature: swissAdultResult.envelope?.institutionalClearance?.envelopeSignature,
+      }),
+    }).then((res) => res.json());
+    record(
+      droppedPolicy === true &&
+      strippedPolicyBody.valid === false &&
+      strippedPolicyBody.reason === 'malformed' &&
+      rewrittenPolicyBody.valid === false &&
+      rewrittenPolicyBody.reason === 'signature_rejected',
+      `5.10 Policy fields are inside the signature (stripped=${strippedPolicyBody.reason}, rewritten=${rewrittenPolicyBody.reason})`
+    );
 
     console.log('  -> Group 5 passed successfully.\n');
 
@@ -775,6 +1378,43 @@ async function runPilotVerificationSuite() {
     record(authenticTobaccoResult.envelope?.productVerification?.status === 'authentic', '6.1h Envelope productVerification marks status as authentic');
     record(authenticTobaccoResult.envelope?.productVerification?.verdict === '[OK / AUTHENTIC]', '6.1i Envelope productVerification verdict is [OK / AUTHENTIC]');
     record(authenticTobaccoResult.logs.some(l => l.step === 0 && l.status === 'PASS' && l.details.includes('[OK / AUTHENTIC]')), '6.1j Execution logs contain Step 0 PASS with authentic signature confirmation');
+    const tobaccoClearance = authenticTobaccoResult.envelope?.institutionalClearance?.envelope;
+    record(tobaccoClearance?.productUid === 'UID-9904-AUTH-951', '6.1k Signed clearance binds the verified tobacco UID');
+    record(tobaccoClearance?.productCategory === 'Tobacco', '6.1l Signed clearance binds the verified category');
+    record(tobaccoClearance?.productStatus === 'authentic', '6.1m Signed clearance binds authentic status');
+    record(
+      tobaccoClearance?.retailSale === true && tobaccoClearance?.excise === 3.85 && acceptRetailSale(tobaccoClearance) === true,
+      '6.1p Signed clearance is a retail sale and carries the catalog excise 3.85'
+    );
+    const forgedCategory = { ...tobaccoClearance, productCategory: 'Alcohol' };
+    const forgedCategoryBody = await fetch(`${baseUrl}/api/v1/envelope/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        envelope: forgedCategory,
+        envelopeSignature: authenticTobaccoResult.envelope?.institutionalClearance?.envelopeSignature,
+      }),
+    }).then((res) => res.json());
+    record(
+      forgedCategoryBody.valid === false && forgedCategoryBody.reason === 'signature_rejected',
+      `6.1n Forged product category is rejected (${forgedCategoryBody.reason})`
+    );
+    const forgedExciseBody = await fetch(`${baseUrl}/api/v1/envelope/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        envelope: { ...tobaccoClearance, excise: 0 },
+        envelopeSignature: authenticTobaccoResult.envelope?.institutionalClearance?.envelopeSignature,
+      }),
+    }).then((res) => res.json());
+    record(
+      forgedExciseBody.valid === false && forgedExciseBody.reason === 'signature_rejected',
+      `6.1q Forged excise is rejected (${forgedExciseBody.reason})`
+    );
+    record(
+      authenticTobaccoResult.totalTimeMs < SWISS_PILOT_PROFILE.targetMaxLatencyMs,
+      `6.1o RFID tobacco path within POS budget: ${authenticTobaccoResult.totalTimeMs} ms < ${SWISS_PILOT_PROFILE.targetMaxLatencyMs} ms`
+    );
 
     // 6.2 Authentic cognac item (UID-8812-AUTH-324): approves, €3.85 excise, PDF certificate compiles with embedded UID, category, and verdict
     const authenticCognacResult = await runPilotDemonstration({
@@ -788,13 +1428,41 @@ async function runPilotVerificationSuite() {
     record(authenticCognacResult.envelope?.merchantClearance.productHardwareUid === 'UID-8812-AUTH-324', '6.2b Cognac hardware UID bound in envelope');
     record(authenticCognacResult.envelope?.merchantClearance.productCategory === 'Alcohol', '6.2c Cognac category verified as Alcohol');
     record(authenticCognacResult.envelope?.merchantClearance.exciseDutyRecovered === 3.85, '6.2d Cognac excise duty recovered (€3.85)');
+    const cognacSigned = authenticCognacResult.envelope?.institutionalClearance?.envelope;
+    record(
+      cognacSigned?.retailSale === true && cognacSigned?.excise === 3.85 && acceptRetailSale(cognacSigned) === true,
+      '6.2p Signed cognac envelope carries the catalog excise'
+    );
     const cognacPdf = buildAuditCertificatePdfDoc(
       authenticCognacResult.envelope!,
       authenticCognacResult.citizen,
       DEFAULT_UHD_RFID_ASSERTIONS.find(r => r.hardwareUid === 'UID-8812-AUTH-324')
     );
     const cognacPdfBytes = cognacPdf.output('arraybuffer');
+    const cognacPdfText = pdfPlainText(cognacPdfBytes);
+    const cognacHash = authenticCognacResult.envelope?.cryptographicReceipt.auditReceiptHash;
+    const cognacSignature = authenticCognacResult.envelope?.institutionalClearance?.envelopeSignature || '';
+    const cognacTill = authenticCognacResult.envelope?.institutionalClearance
+      ? await receiptSha256Hex(authenticCognacResult.envelope.institutionalClearance.envelope)
+      : '';
     record(cognacPdfBytes.byteLength > 2000, `6.2e Official Audit Certificate PDF compiled with embedded UHF RFID metadata (${cognacPdfBytes.byteLength} bytes)`);
+    record(cognacPdfText.includes('UID-8812-AUTH-324'), '6.2f PDF contains the cognac UID');
+    record(cognacPdfText.includes('Alcohol'), '6.2g PDF contains the Alcohol category');
+    record(cognacPdfText.includes('[OK / AUTHENTIC]'), '6.2h PDF contains the authentic verdict');
+    record(typeof cognacHash === 'string' && cognacHash.length === 64 && cognacPdfText.includes(cognacHash), '6.2i PDF contains the full receipt hash');
+    record(cognacSignature.length > 0 && cognacPdfText.includes(cognacSignature), '6.2j PDF contains the institutional signature');
+    const conflictingPdf = buildAuditCertificatePdfDoc(
+      authenticCognacResult.envelope!,
+      authenticCognacResult.citizen,
+      DEFAULT_UHD_RFID_ASSERTIONS.find(r => r.hardwareUid === 'UID-9904-AUTH-951')
+    );
+    const conflictingText = pdfPlainText(conflictingPdf.output('arraybuffer'));
+    record(
+      conflictingText.includes('UID-8812-AUTH-324') && !conflictingText.includes('UID-9904-AUTH-951'),
+      '6.2k Signed product claims override a conflicting client RFID row'
+    );
+    record(cognacTill === cognacHash, '6.2l Till recomputes the cognac receipt hash and it matches the PDF');
+    await assertSignedEnvelope('6.2m', authenticCognacResult.envelope?.institutionalClearance);
 
     // 6.3 Counterfeit vaporizer (UID-1102-FAKE-881): fails with REJECTED_COUNTERFEIT, error contains [STOCK POLICY BLOCK: COUNTERFEIT DETECTED], envelope withheld
     const counterfeitResult = await runPilotDemonstration({
@@ -866,6 +1534,140 @@ async function runPilotVerificationSuite() {
     record(
       acsFailResult.error?.includes('SAML ACS rejected') === true,
       `6.6e ACS rejection is the recorded error: "${acsFailResult.error}"`
+    );
+
+    const stockAuthentic = await postStock({ hardwareUid: 'UID-9904-AUTH-951' });
+    record(
+      stockAuthentic.ok === true &&
+      stockAuthentic.signatureVerified === true &&
+      stockAuthentic.reason === 'verified' &&
+      stockAuthentic.category === 'Tobacco' &&
+      stockAuthentic.status === 'authentic' &&
+      stockAuthentic.hardwareUid === 'UID-9904-AUTH-951' &&
+      stockAuthentic.exciseRecovered === 3.85 &&
+      !Object.prototype.hasOwnProperty.call(stockAuthentic, 'signature'),
+      '6.7a Server verifies the authentic tobacco manufacturer signature'
+    );
+    const stockByName = await postStock({ productName: 'Swiss Appenzeller Alpine Spirits (18+ Restricted)' });
+    record(
+      stockByName.ok === true && stockByName.hardwareUid === 'UID-7701-AUTH-118' && stockByName.category === 'Alcohol',
+      '6.7b Exact product name resolves to the signed Swiss spirits row'
+    );
+    const stockBad = await postStock({ hardwareUid: 'UID-0000-BADSIG-1' });
+    record(
+      stockBad.ok === false &&
+      stockBad.reason === 'signature_rejected' &&
+      stockBad.signatureVerified === false &&
+      stockBad.status === 'authentic',
+      '6.7c A catalog row with a tampered signature is rejected even when its status says authentic'
+    );
+    const stockUnsigned = await postStock({ hardwareUid: 'UID-0000-UNSIGNED-1' });
+    record(
+      stockUnsigned.ok === false && stockUnsigned.reason === 'unsigned' && stockUnsigned.signatureVerified === false,
+      '6.7d An unsigned catalog row is rejected'
+    );
+    const stockUnknown = await postStock({ hardwareUid: 'UID-DOES-NOT-EXIST' });
+    const stockUnknownText = JSON.stringify(stockUnknown);
+    record(
+      stockUnknown.ok === false &&
+      stockUnknown.reason === 'unknown_uid' &&
+      !stockUnknownText.includes('UID-9904-AUTH-951'),
+      '6.7e Unknown UID fails closed and is not rewritten to the tobacco row'
+    );
+    const stockCounterfeit = await postStock({ hardwareUid: 'UID-1102-FAKE-881' });
+    record(
+      stockCounterfeit.ok === false && stockCounterfeit.reason === 'counterfeit' && stockCounterfeit.signatureVerified === true,
+      '6.7f A valid signature over counterfeit status still fails the stock policy'
+    );
+    const stockRecalled = await postStock({ hardwareUid: 'UID-3221-RECALLED-60' });
+    record(
+      stockRecalled.ok === false && stockRecalled.reason === 'recalled' && stockRecalled.signatureVerified === true,
+      '6.7g A valid signature over recalled status still fails the stock policy'
+    );
+    const stockMissing = await postStock({});
+    record(stockMissing.ok === false && stockMissing.reason === 'missing_uid', '6.7h A stock request without a UID fails closed');
+
+    const tamperedDemo = await runPilotDemonstration({
+      jurisdiction: 'CH_FADP',
+      citizenPreset: 'swiss_adult',
+      productUid: 'UID-0000-BADSIG-1',
+      baseUrl
+    });
+    record(tamperedDemo.success === false, '6.8a Tampered manufacturer signature halts the pilot');
+    record(tamperedDemo.currentStep === 0, '6.8b Tampered signature halts at Step 0');
+    record(tamperedDemo.envelope === undefined, '6.8c No envelope issued for a tampered signature');
+    record(
+      tamperedDemo.error?.includes('[STOCK POLICY BLOCK: MANUFACTURER SIGNATURE REJECTED]') === true,
+      `6.8d Tampered signature error: "${tamperedDemo.error}"`
+    );
+
+    const unsignedDemo = await runPilotDemonstration({
+      jurisdiction: 'CH_FADP',
+      citizenPreset: 'swiss_adult',
+      productUid: 'UID-0000-UNSIGNED-1',
+      baseUrl
+    });
+    record(unsignedDemo.success === false, '6.9a Unsigned catalog row halts the pilot');
+    record(unsignedDemo.currentStep === 0, '6.9b Unsigned row halts at Step 0');
+    record(unsignedDemo.envelope === undefined, '6.9c No envelope issued for an unsigned row');
+    record(
+      unsignedDemo.error?.includes('[STOCK POLICY BLOCK: UNSIGNED PRODUCT]') === true,
+      `6.9d Unsigned product error: "${unsignedDemo.error}"`
+    );
+
+    const badClearance = await issueSignedClearance('UID-0000-BADSIG-1');
+    const badClearanceText = JSON.stringify(badClearance.response);
+    record(
+      badClearance.response.valid === false &&
+      badClearance.response.reason === 'Manufacturer signature rejected' &&
+      badClearance.response.envelope === undefined &&
+      !badClearanceText.includes('UID-0000-BADSIG-1'),
+      `6.10a Clearance rejects a tampered catalog row without echoing the UID (${badClearance.response.reason})`
+    );
+    const { productUid: droppedUid, ...retryPayload } = badClearance.payload;
+    const released = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: badClearance.cookie },
+      body: JSON.stringify(retryPayload),
+    }).then((res) => res.json());
+    record(
+      droppedUid === 'UID-0000-BADSIG-1' &&
+      released.valid === true &&
+      released.envelope?.productUid === undefined &&
+      released.envelope?.productCategory === undefined &&
+      released.envelope?.productStatus === undefined &&
+      released.envelope?.excise === undefined &&
+      released.envelope?.retailSale === false &&
+      acceptRetailSale(released.envelope) === false &&
+      released.envelope?.sessionAgeGatePassed === true &&
+      released.envelope?.loaHigh === false,
+      '6.10b A rejected product releases the nonce and the retry is an age gate, not a sale'
+    );
+    const ageOnlySale = await fetch(`${baseUrl}/api/v1/envelope/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ envelope: released.envelope, envelopeSignature: released.envelopeSignature }),
+    }).then((res) => res.json());
+    record(
+      ageOnlySale.valid === true && ageOnlySale.retailSale === false,
+      `6.10c A till does not accept the age-only envelope as a sale (${ageOnlySale.retailSale})`
+    );
+
+    const blockedClearance = await issueSignedClearance('UID-1102-FAKE-881');
+    const blockedText = JSON.stringify(blockedClearance.response);
+    record(
+      blockedClearance.response.valid === false &&
+      blockedClearance.response.reason === 'Product is blocked' &&
+      !blockedText.includes('UID-1102-FAKE-881'),
+      `6.11 Clearance blocks a counterfeit UID (${blockedClearance.response.reason})`
+    );
+    const unsignedClearance = await issueSignedClearance('UID-0000-UNSIGNED-1');
+    const unsignedText = JSON.stringify(unsignedClearance.response);
+    record(
+      unsignedClearance.response.valid === false &&
+      unsignedClearance.response.reason === 'Manufacturer signature is missing' &&
+      !unsignedText.includes('UID-0000-UNSIGNED-1'),
+      `6.12 Clearance rejects an unsigned UID (${unsignedClearance.response.reason})`
     );
 
     console.log('  -> Group 6 passed successfully.\n');
@@ -1074,8 +1876,8 @@ async function runPilotVerificationSuite() {
         true,
         ['sign', 'verify']
       );
-      const durableFactor = 'HE-P256-DURABLE-FP';
-      const durableMsg = clearanceMessage(durableChal.challenge, durableFactor, bytesToHex(new Uint8Array(durableDigest)));
+      const durableBound = await preparedClearanceFactor();
+      const durableMsg = clearanceMessage(durableChal.challenge, durableBound.secondFactorHash, bytesToHex(new Uint8Array(durableDigest)));
       const durableSig = await crypto.webcrypto.subtle.sign(
         { name: 'ECDSA', hash: { name: 'SHA-256' } },
         durableUserKey.privateKey,
@@ -1084,15 +1886,18 @@ async function runPilotVerificationSuite() {
       const durablePayload = {
         v: 1,
         challengeId: durableChal.challenge,
-        secondFactorHash: durableFactor,
+        secondFactorHash: durableBound.secondFactorHash,
+        credentialId: durableBound.credentialId,
+        webauthnAssertion: durableBound.assertion,
         userPublicKey: await crypto.webcrypto.subtle.exportKey('jwk', durableUserKey.publicKey),
         userSignature: Buffer.from(durableSig).toString('base64url'),
         proofBase64: bytesToBase64(durableProof),
         institutionalSignature: durableChal.signatureBase64
       };
+      const durableCookie = await sessionCookie('swiss_adult');
       const durableVerifyRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Cookie: durableCookie },
         body: JSON.stringify(durablePayload)
       });
       const durableVerifyBody = await durableVerifyRes.json();
@@ -1105,7 +1910,7 @@ async function runPilotVerificationSuite() {
       replaceInstitutionalChallengeStore(new FileDurableMap(instPath));
       const restartReplayRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Cookie: durableCookie },
         body: JSON.stringify(durablePayload)
       });
       const restartReplayBody = await restartReplayRes.json();
@@ -1239,6 +2044,41 @@ async function runPilotVerificationSuite() {
         `9.2 Rotation switches the key id and keeps the in-flight nonce (old=${signedBody.keyId}, new=${rotatedBody.keyId})`
       );
 
+      const rotatedJwks = await fetch(`${baseUrl}/api/v1/jwks`).then((res) => res.json()) as {
+        keys?: Array<{ kid?: string; status?: string; d?: string }>;
+      };
+      const previousPublished = (rotatedJwks.keys || []).find((key) => key.kid === signedBody.keyId);
+      const activePublished = (rotatedJwks.keys || []).find((key) => key.kid === 'ch-rotated-kid');
+      const tillAfterRotation = await verifyQrWithJwks(swissAdultResult.envelope?.qrPayload || '');
+      record(
+        previousPublished?.status === 'retired' &&
+        previousPublished.d === undefined &&
+        activePublished?.status === 'active' &&
+        tillAfterRotation.local === true &&
+        tillAfterRotation.http?.valid === true &&
+        tillAfterRotation.http?.keyId === signedBody.keyId,
+        `9.6 Previous public key still verifies the QR inside the envelope TTL (${tillAfterRotation.http?.reason || tillAfterRotation.http?.keyId})`
+      );
+
+      const keptInsideTtl = backdateRetiredInstitutionalKey(signedBody.keyId, Date.now() - CLEARANCE_ENVELOPE_TTL_MS + 1000);
+      const insideWindow = await verifyQrWithJwks(swissAdultResult.envelope?.qrPayload || '');
+      const expiredPublication = backdateRetiredInstitutionalKey(signedBody.keyId, Date.now() - CLEARANCE_ENVELOPE_TTL_MS);
+      const afterTtl = await verifyQrWithJwks(swissAdultResult.envelope?.qrPayload || '');
+      const jwksAfterTtl = await fetch(`${baseUrl}/api/v1/jwks`).then((res) => res.json()) as {
+        keys?: Array<{ kid?: string }>;
+      };
+      record(
+        keptInsideTtl === true &&
+        insideWindow.http?.valid === true &&
+        expiredPublication === true &&
+        afterTtl.local === false &&
+        afterTtl.http?.valid === false &&
+        afterTtl.http?.reason === 'signature_rejected' &&
+        (jwksAfterTtl.keys || []).some((key) => key.kid === signedBody.keyId) === false &&
+        (jwksAfterTtl.keys || []).some((key) => key.kid === 'ch-rotated-kid') === true,
+        `9.7 Previous public key leaves the JWKS when the envelope TTL ends (${afterTtl.http?.reason})`
+      );
+
       await rotateInstitutionalKey('CH', {
         publicKeyJwk: originalPublicJwk,
         privateKeyJwk: originalPrivateJwk,
@@ -1354,11 +2194,12 @@ async function runPilotVerificationSuite() {
         challenge: string,
         institutionalSignature: string,
         proofBytes: Uint8Array,
-        proveMs: number
+        proveMs: number,
+        factor: string = sentinelFactor
       ) => {
         const digest = await crypto.webcrypto.subtle.digest('SHA-256', proofBytes);
         const userKey = await crypto.webcrypto.subtle.generateKey(ecdsaParams, true, ['sign', 'verify']);
-        const message = clearanceMessage(challenge, sentinelFactor, bytesToHex(new Uint8Array(digest)));
+        const message = clearanceMessage(challenge, factor, bytesToHex(new Uint8Array(digest)));
         const signature = await crypto.webcrypto.subtle.sign(
           { name: 'ECDSA', hash: 'SHA-256' },
           userKey.privateKey,
@@ -1367,7 +2208,7 @@ async function runPilotVerificationSuite() {
         return {
           v: 1,
           challengeId: challenge,
-          secondFactorHash: sentinelFactor,
+          secondFactorHash: factor,
           userPublicKey: await crypto.webcrypto.subtle.exportKey('jwk', userKey.publicKey),
           userSignature: Buffer.from(signature).toString('base64url'),
           proofBase64: bytesToBase64(proofBytes),
@@ -1398,18 +2239,25 @@ async function runPilotVerificationSuite() {
         body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
       }).then((res) => res.json());
       const successProof = await generateProof(32, 18);
-      const successPayload = await signClearance(successIssued.challenge, successIssued.signatureBase64, successProof, 15);
+      const auditBound = await preparedClearanceFactor();
+      const successPayload = {
+        ...(await signClearance(successIssued.challenge, successIssued.signatureBase64, successProof, 15, auditBound.secondFactorHash)),
+        credentialId: auditBound.credentialId,
+        webauthnAssertion: auditBound.assertion,
+      };
+      const auditCookie = await sessionCookie('swiss_adult');
       const successRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Cookie: auditCookie },
         body: JSON.stringify(successPayload)
       });
       const successBody = await successRes.json();
       const replayBody = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Cookie: auditCookie },
         body: JSON.stringify(successPayload)
       }).then((res) => res.json());
+      const missingAudit = await issueSignedClearance(undefined, { cookie: '' });
 
       await fetch(`${baseUrl}/api/institutional-challenge`, {
         method: 'POST',
@@ -1483,6 +2331,13 @@ async function runPilotVerificationSuite() {
         !logText.includes('proofBase64'),
         '10.6 Audit lines omit the factor hash, name, date of birth, and raw proof'
       );
+      record(
+        missingAudit.response.valid === false &&
+        missingAudit.response.reason === 'Session is required' &&
+        logLines.some((line) => line.event === 'clearance_failure' && line.reason === 'session_required' && line.jurisdiction === 'CH') &&
+        !logText.includes('"age"'),
+        `10.8 A clearance without a session is audited as session_required (${missingAudit.response.reason})`
+      );
 
       const metricsRes = await fetch(`${baseUrl}/api/metrics`);
       const metrics = await metricsRes.json();
@@ -1509,6 +2364,144 @@ async function runPilotVerificationSuite() {
 
     console.log('  -> Group 10 passed successfully.\n');
 
+    // =========================================================================
+    // GROUP 11: Access-log write and export require session and operator role.
+    // =========================================================================
+    console.log('▶ [GROUP 11] Access-log events require a session; export and clear require an operator');
+
+    const requestEmail = 'leak-sentinel@example.test';
+    const requestName = 'Leak Sentinel';
+    const beforeEvents = await getAccessLogs({ limit: 1 });
+    const unauthEvent = await fetch(`${baseUrl}/api/auth/record-event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user: { uid: 'pilot-guest', email: requestEmail, name: requestName },
+        action: 'APP_ACCESS',
+      }),
+    });
+    const unauthEventBody = await unauthEvent.json();
+    const afterUnauthEvent = await getAccessLogs({ search: requestEmail, limit: 5 });
+    const afterUnauthName = await getAccessLogs({ search: requestName, limit: 5 });
+    const afterUnauthTotal = await getAccessLogs({ limit: 1 });
+    record(
+      unauthEvent.status === 401 &&
+      unauthEventBody.log === undefined &&
+      !JSON.stringify(unauthEventBody).includes(requestEmail) &&
+      afterUnauthEvent.total === 0 &&
+      afterUnauthName.total === 0 &&
+      afterUnauthTotal.total === beforeEvents.total,
+      `11.1 Unauthenticated record-event is 401 and stores nothing (${unauthEvent.status})`
+    );
+
+    const demoCookie = await sessionCookie('swiss_adult');
+    const demoSession = await fetch(`${baseUrl}/saml/session`, { headers: { Cookie: demoCookie } }).then((res) => res.json());
+    const highCookie = await sessionCookie('it_adult_high');
+    const highSession = await fetch(`${baseUrl}/saml/session`, { headers: { Cookie: highCookie } }).then((res) => res.json());
+    const afterMint = await getAccessLogs({ limit: 1 });
+    const demoList = await fetch(`${baseUrl}/api/access-logs`, { headers: { Cookie: demoCookie } });
+    const demoExport = await fetch(`${baseUrl}/api/access-logs/export`, { headers: { Cookie: demoCookie } });
+    const demoClear = await fetch(`${baseUrl}/api/access-logs/clear`, { method: 'POST', headers: { Cookie: demoCookie } });
+    const highExport = await fetch(`${baseUrl}/api/access-logs/export`, { headers: { Cookie: highCookie } });
+    const highClear = await fetch(`${baseUrl}/api/access-logs/clear`, { method: 'POST', headers: { Cookie: highCookie } });
+    const afterDemoDeny = await getAccessLogs({ limit: 1 });
+    record(
+      demoSession.active === true &&
+      demoSession.user?.role === 'STORE_MANAGER' &&
+      demoList.status === 403 &&
+      demoExport.status === 403 &&
+      demoClear.status === 403 &&
+      highSession.user?.role === 'STORE_MANAGER' &&
+      Array.isArray(highSession.user?.permissions) &&
+      highSession.user.permissions.includes('ELEVATED_AUDIT_LOG_EXPORT') &&
+      highExport.status === 403 &&
+      highClear.status === 403 &&
+      afterDemoDeny.total === afterMint.total,
+      `11.2 Demo sessions cannot list, export, or clear the access log (swiss ${demoList.status}/${demoExport.status}/${demoClear.status}, high ${highExport.status}/${highClear.status})`
+    );
+
+    const unauthList = await fetch(`${baseUrl}/api/access-logs`);
+    const unauthExport = await fetch(`${baseUrl}/api/access-logs/export`);
+    const unauthClear = await fetch(`${baseUrl}/api/access-logs/clear`, { method: 'POST' });
+    const unauthStats = await fetch(`${baseUrl}/api/access-logs/stats`);
+    const demoStats = await fetch(`${baseUrl}/api/access-logs/stats`, { headers: { Cookie: demoCookie } });
+    const demoStillActive = await fetch(`${baseUrl}/saml/session`, { headers: { Cookie: demoCookie } }).then((res) => res.json());
+    record(
+      unauthList.status === 401 &&
+      unauthExport.status === 401 &&
+      unauthClear.status === 401 &&
+      unauthStats.status === 401 &&
+      demoStats.status === 200 &&
+      demoStillActive.active === true,
+      `11.3 Other session checks stay in place (stats demo=${demoStats.status}, unauth list=${unauthList.status})`
+    );
+
+    const operator = globalSessionStore.createSession({
+      uid: 'pilot-audit-operator',
+      email: 'operator@bilanx.test',
+      name: 'Audit Operator',
+      authMethod: 'eidas_saml',
+      role: 'OPERATOR',
+      authenticatedAt: new Date().toISOString(),
+    });
+    const operatorCookie = `session_token=${encodeURIComponent(operator.token)}`;
+    const operatorList = await fetch(`${baseUrl}/api/access-logs?limit=1`, { headers: { Cookie: operatorCookie } });
+    const operatorListBody = await operatorList.json();
+    const operatorExport = await fetch(`${baseUrl}/api/access-logs/export`, { headers: { Cookie: operatorCookie } });
+    const operatorExportText = await operatorExport.text();
+    const rowsBeforeClear = await getAccessLogs({ limit: 1 });
+    const operatorClear = await fetch(`${baseUrl}/api/access-logs/clear`, { method: 'POST', headers: { Cookie: operatorCookie } });
+    const operatorClearBody = await operatorClear.json();
+    const rowsAfterClear = await getAccessLogs({ limit: 1 });
+    record(
+      operatorList.status === 200 &&
+      Array.isArray(operatorListBody.logs) &&
+      operatorExport.status === 200 &&
+      (operatorExport.headers.get('content-type') || '').includes('text/csv') &&
+      operatorExportText.startsWith('ID,Timestamp') &&
+      rowsBeforeClear.total > 0 &&
+      operatorClear.status === 200 &&
+      operatorClearBody.success === true &&
+      rowsAfterClear.total === 0,
+      `11.4 An operator session can list, export, and clear (${operatorList.status}/${operatorExport.status}/${operatorClear.status})`
+    );
+
+    const logoutAcs = await fetch(`${baseUrl}/saml/acs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preset: 'swiss_adult' }),
+    }).then((res) => res.json());
+    const logoutEvent = await fetch(`${baseUrl}/api/auth/record-event`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${logoutAcs.sessionToken}`,
+      },
+      body: JSON.stringify({
+        user: { email: requestEmail, name: requestName },
+        action: 'LOGOUT',
+      }),
+    });
+    const logoutEventBody = await logoutEvent.json();
+    const logoutSession = await fetch(`${baseUrl}/saml/session`, {
+      headers: { Authorization: `Bearer ${logoutAcs.sessionToken}` },
+    });
+    const storedRequest = await getAccessLogs({ search: requestEmail, limit: 5 });
+    const originalStillActive = await fetch(`${baseUrl}/saml/session`, { headers: { Cookie: demoCookie } }).then((res) => res.json());
+    record(
+      logoutEvent.status === 200 &&
+      logoutEventBody.log?.email === logoutAcs.user?.email &&
+      logoutEventBody.log?.name === logoutAcs.user?.name &&
+      logoutEventBody.log?.email !== requestEmail &&
+      !JSON.stringify(logoutEventBody).includes(requestEmail) &&
+      logoutSession.status === 401 &&
+      storedRequest.total === 0 &&
+      originalStillActive.active === true,
+      `11.5 A bearer session records its own identity and logout invalidates that session (${logoutEvent.status})`
+    );
+
+    console.log('  -> Group 11 passed successfully.\n');
+
     console.log('================================================================================');
     console.log(`🏆 PILOT SANDBOX E2E SUMMARY: ${totalPassed} PASSED | ${totalFailed} FAILED (100% Pass Rate)`);
     console.log('================================================================================\n');
@@ -1517,7 +2510,12 @@ async function runPilotVerificationSuite() {
   } catch (err) {
     console.error('Unhandled test harness error:', err);
     server.close();
-    process.exit(1);
+    process.exitCode = 1;
+  } finally {
+    if (previousAccessLogPath === undefined) delete process.env.ACCESS_LOG_PATH;
+    else process.env.ACCESS_LOG_PATH = previousAccessLogPath;
+    fs.rmSync(accessLogDir, { recursive: true, force: true });
+    if (process.exitCode) process.exit(process.exitCode);
   }
 }
 

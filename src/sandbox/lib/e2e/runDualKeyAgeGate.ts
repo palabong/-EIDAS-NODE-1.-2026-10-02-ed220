@@ -5,6 +5,7 @@ import { AGE_GATE_POLICY_THRESHOLD } from '../../../lib/crypto/clearanceMessage.
 export type E2EAgeGateInput = {
   age: number;
   threshold?: number; // server policy is 18; any other value is refused before a POST
+  baseUrl?: string;
 };
 
 export type E2EAgeGateResult = {
@@ -72,6 +73,7 @@ export async function runDualKeyAgeGate(input: E2EAgeGateInput): Promise<E2EAgeG
     const dkStart = performance.now();
     const dkResult = await performDualKeyHandshake('inst-sandbox', 'user-factor-123', {
       proofBytes,
+      baseUrl: input.baseUrl,
     });
     timings.dualKey_ms = performance.now() - dkStart;
     timings.server_dual_key_verify_ms = dkResult.serverVerifyMs;

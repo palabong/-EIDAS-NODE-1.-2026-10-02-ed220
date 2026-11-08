@@ -57,8 +57,7 @@ export function mountWebAuthnRoutes(app: express.Express): void {
       rp: { name: 'Project Bilanx Sovereign Node', id: rpId },
       user: { id: Buffer.from(username).toString('base64url'), name: username, displayName },
       pubKeyCredParams: [
-        { alg: -7, type: 'public-key' },  // ES256 (ECDSA P-256)
-        { alg: -257, type: 'public-key' } // RS256 (RSA SHA-256)
+        { alg: -7, type: 'public-key' } // ES256 (ECDSA P-256)
       ],
       authenticatorSelection,
       attestation: 'direct'

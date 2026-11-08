@@ -4,12 +4,15 @@
  * equals the server policy. The nonce is consumed only after both checks pass.
  */
 
-import { webcrypto } from 'crypto';
+import { createHash, timingSafeEqual, webcrypto } from 'crypto';
 import { CapacityExceededError } from './httpShared.ts';
 import { bindDurableStore, openDurableMap, type DurableStore } from './durableStore.ts';
 import { boundedMs, recordClearanceAudit } from './clearanceAudit.ts';
-import { jurisdictionForInstitution } from './institutionalKey.ts';
+import { getInstitutionalKey, jurisdictionForInstitution } from './institutionalKey.ts';
 import { bytesToHex } from '../lib/crypto/encoding.ts';
+import { signClearanceEnvelope, type ClearanceProductCategory } from '../lib/crypto/clearanceEnvelope.ts';
+import { verifyStockRequest, type StockReason } from './rfidCatalog.ts';
+import { verifyWebAuthnAssertion } from './webauthnServer.ts';
 import {
   AGE_GATE_POLICY_THRESHOLD,
   clearanceMessage,
@@ -149,13 +152,130 @@ function release(challengeId: string, record: ActiveChallengeRecord): void {
   }
 }
 
+export interface ClearanceSessionClaims {
+  levelOfAssurance?: string;
+  isOver18?: boolean;
+}
+
+/** present is true when the request carried a session token. claims is null when that token did not resolve. */
+export interface ClearanceSessionGate {
+  present: boolean;
+  claims: ClearanceSessionClaims | null;
+}
+
+function sessionLoa(value: string | undefined): 'high' | 'substantial' | 'low' | 'unknown' {
+  const loa = (value || '').toLowerCase();
+  if (loa.includes('substantial')) return 'substantial';
+  if (loa.includes('high')) return 'high';
+  if (loa.includes('low')) return 'low';
+  return 'unknown';
+}
+
+function sessionPolicyReason(
+  jurisdiction: 'CH' | 'IT',
+  gate: ClearanceSessionGate
+): 'session_required' | 'session_invalid' | 'session_underage' | 'loa_insufficient' | null {
+  if (!gate.present) return 'session_required';
+  if (!gate.claims) return 'session_invalid';
+  if (gate.claims.isOver18 !== true) return 'session_underage';
+  if (jurisdiction === 'IT' && sessionLoa(gate.claims.levelOfAssurance) !== 'high') return 'loa_insufficient';
+  return null;
+}
+
+function sessionPolicyMessage(
+  reason: 'session_required' | 'session_invalid' | 'session_underage' | 'loa_insufficient'
+): string {
+  if (reason === 'session_required') return 'Session is required';
+  if (reason === 'session_invalid') return 'Session is missing or expired';
+  if (reason === 'session_underage') return 'Session age gate rejected the clearance';
+  return 'Italian LoA High is required';
+}
+
+export interface ClearanceRequestContext {
+  origin: string | null;
+  rpId: string;
+}
+
+/** SHA-256 of the UTF-8 credential id. The same digest is what the client signs. */
+export function credentialSecondFactorHash(credentialId: string): string {
+  return createHash('sha256').update(credentialId).digest('hex');
+}
+
+function bindSecondFactor(
+  body: Record<string, unknown>,
+  secondFactorHash: string,
+  requestContext: ClearanceRequestContext
+): { ok: true } | { ok: false; reason: 'second_factor_unbound' | 'second_factor_rejected'; message: string } {
+  const credentialId = typeof body.credentialId === 'string' ? body.credentialId : '';
+  const assertion = body.webauthnAssertion;
+  const response = assertion && typeof assertion === 'object'
+    ? ((assertion as { response?: unknown }).response && typeof (assertion as { response?: unknown }).response === 'object'
+      ? (assertion as { response: Record<string, unknown> }).response
+      : assertion as Record<string, unknown>)
+    : null;
+  if (
+    !credentialId ||
+    !response ||
+    typeof response.clientDataJSON !== 'string' ||
+    typeof response.authenticatorData !== 'string' ||
+    typeof response.signature !== 'string'
+  ) {
+    return {
+      ok: false,
+      reason: 'second_factor_unbound',
+      message: 'Second factor is not bound to a verified authenticator',
+    };
+  }
+  if (!requestContext.origin) {
+    return { ok: false, reason: 'second_factor_rejected', message: 'Origin mismatch or untrusted origin' };
+  }
+  const verified = verifyWebAuthnAssertion({
+    credentialId,
+    clientDataJSONB64: response.clientDataJSON,
+    authenticatorDataB64: response.authenticatorData,
+    signatureB64: response.signature,
+    expectedOrigin: requestContext.origin,
+    expectedRpId: requestContext.rpId,
+    requireUserVerification: true,
+  });
+  if (!verified.verified) {
+    return {
+      ok: false,
+      reason: 'second_factor_rejected',
+      message: verified.error || 'Second factor assertion was rejected',
+    };
+  }
+  const expected = credentialSecondFactorHash(credentialId);
+  const expectedBytes = Buffer.from(expected);
+  const presentedBytes = Buffer.from(secondFactorHash);
+  if (expectedBytes.length !== presentedBytes.length || !timingSafeEqual(expectedBytes, presentedBytes)) {
+    return {
+      ok: false,
+      reason: 'second_factor_rejected',
+      message: 'Second factor hash does not match the verified credential',
+    };
+  }
+  return { ok: true };
+}
+
+function productRejectionMessage(reason: StockReason): string {
+  if (reason === 'signature_rejected') return 'Manufacturer signature rejected';
+  if (reason === 'unsigned') return 'Manufacturer signature is missing';
+  if (reason === 'counterfeit' || reason === 'recalled') return 'Product is blocked';
+  return 'Product is not in the institutional catalog';
+}
+
 /**
  * Synchronous challenge claim happens before the first await.
  * A second caller sees inflight and is a replay. A failed check clears inflight.
+ * Every clearance requires a resolved session. The age gate must pass, and IT also requires LoA High.
+ * Those results are written into the signed envelope. A missing cookie is rejected.
  */
 export async function verifyClearance(
   payload: unknown,
-  keyPair: webcrypto.CryptoKeyPair
+  keyPair: webcrypto.CryptoKeyPair,
+  session: ClearanceSessionGate = { present: false, claims: null },
+  requestContext: ClearanceRequestContext = { origin: null, rpId: '' }
 ): Promise<ClearanceHttpResult> {
   const started = performance.now();
   const prove_ms = boundedMs(
@@ -166,7 +286,7 @@ export async function verifyClearance(
   const audit = (
     event: 'replay_rejected' | 'proof_failure' | 'clearance_success' | 'clearance_failure',
     reason: string,
-    extra?: { jurisdiction?: 'CH' | 'IT'; verify_ms?: number }
+    extra?: { jurisdiction?: 'CH' | 'IT'; verify_ms?: number; keyId?: string }
   ): void => {
     recordClearanceAudit({
       event,
@@ -307,17 +427,99 @@ export async function verifyClearance(
       });
     }
 
+    const policyReason = sessionPolicyReason(jurisdiction, session);
+    if (policyReason) {
+      release(challengeId, record);
+      const failedVerifyMs = performance.now() - t0;
+      audit('clearance_failure', policyReason, { jurisdiction, verify_ms: failedVerifyMs });
+      return rejected(200, {
+        reason: sessionPolicyMessage(policyReason),
+        verify_ms: failedVerifyMs,
+        proofByteLength: proofBytes.length,
+      });
+    }
+
+    const requestedProductUid = typeof body.productUid === 'string' ? body.productUid : '';
+    let verifiedProduct: {
+      productUid: string;
+      productCategory: ClearanceProductCategory;
+      productStatus: 'authentic';
+      excise: number;
+    } | undefined;
+    if (requestedProductUid.length > 0) {
+      const stock = await verifyStockRequest({ hardwareUid: requestedProductUid });
+      const category = stock.category;
+      const categoryAllowed = category === 'Tobacco'
+        || category === 'Alcohol'
+        || category === 'Vaporizer'
+        || category === 'Cannabinoids'
+        || category === 'Restricted Hardware';
+      const exciseAllowed = typeof stock.exciseRecovered === 'number'
+        && Number.isFinite(stock.exciseRecovered)
+        && stock.exciseRecovered >= 0;
+      if (
+        stock.ok !== true ||
+        stock.signatureVerified !== true ||
+        stock.status !== 'authentic' ||
+        stock.hardwareUid !== requestedProductUid ||
+        !categoryAllowed ||
+        !exciseAllowed
+      ) {
+        release(challengeId, record);
+        const failedVerifyMs = performance.now() - t0;
+        audit('clearance_failure', 'product_rejected', { jurisdiction, verify_ms: failedVerifyMs });
+        return rejected(200, {
+          reason: productRejectionMessage(stock.reason),
+          verify_ms: failedVerifyMs,
+          proofByteLength: proofBytes.length,
+        });
+      }
+      verifiedProduct = {
+        productUid: stock.hardwareUid,
+        productCategory: category,
+        productStatus: 'authentic',
+        excise: stock.exciseRecovered as number,
+      };
+    }
+
+    const factor = bindSecondFactor(body, secondFactorHash, requestContext);
+    if (factor.ok === false) {
+      release(challengeId, record);
+      const failedVerifyMs = performance.now() - t0;
+      audit('clearance_failure', factor.reason, { jurisdiction, verify_ms: failedVerifyMs });
+      return rejected(200, {
+        reason: factor.message,
+        verify_ms: failedVerifyMs,
+        proofByteLength: proofBytes.length,
+      });
+    }
+
+    const material = await getInstitutionalKey(jurisdiction);
+    const signed = await signClearanceEnvelope(
+      {
+        keyId: material.keyId,
+        jurisdiction,
+        proofSha256: proofSha256Hex,
+        secondFactorHash,
+        ...verifiedProduct,
+      },
+      material.privateKey
+    );
+
     record.consumed = true;
     record.inflight = false;
     activeChallenges.commit(challengeId);
     const successVerifyMs = performance.now() - t0;
-    audit('clearance_success', 'verified', { jurisdiction, verify_ms: successVerifyMs });
+    audit('clearance_success', 'verified', { jurisdiction, verify_ms: successVerifyMs, keyId: material.keyId });
     return {
       status: 200,
       body: {
         valid: true,
         verify_ms: successVerifyMs,
         proofByteLength: proofBytes.length,
+        envelope: signed.envelope,
+        envelopeSignature: signed.envelopeSignature,
+        sessionPolicyEnforced: session.present && session.claims !== null,
       },
     };
   } catch (err) {

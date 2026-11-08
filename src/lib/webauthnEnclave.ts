@@ -119,8 +119,7 @@ export async function registerHardwareEnclaveKey(
       displayName: serverOptions.user.displayName
     },
     pubKeyCredParams: [
-      { alg: -7, type: 'public-key' },  // ES256 (ECDSA P-256)
-      { alg: -257, type: 'public-key' } // RS256 (RSA SHA-256)
+      { alg: -7, type: 'public-key' } // ES256 (ECDSA P-256)
     ],
     authenticatorSelection: {
       authenticatorAttachment: targetAttachment,

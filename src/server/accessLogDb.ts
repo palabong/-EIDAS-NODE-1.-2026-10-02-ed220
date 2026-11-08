@@ -27,8 +27,17 @@ export interface AccessStats {
   dailyActivity: { date: string; count: number }[];
 }
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-const DB_FILE = path.join(DATA_DIR, 'access_logs.json');
+let resolvedAccessLogFile: string | null = null;
+
+/** Default file is data/access_logs.json. ACCESS_LOG_PATH isolates a test process. */
+function accessLogFile(): string {
+  if (resolvedAccessLogFile) return resolvedAccessLogFile;
+  const override = process.env.ACCESS_LOG_PATH?.trim();
+  resolvedAccessLogFile = override && override.length > 0
+    ? override
+    : path.join(process.cwd(), 'data', 'access_logs.json');
+  return resolvedAccessLogFile;
+}
 
 // In-memory cache for ultra-fast reading with asynchronous atomic persistence
 let memoryLogs: AccessLog[] = [];
@@ -38,10 +47,11 @@ let hasPendingWrite = false;
 
 async function ensureDbInitialized() {
   if (isInitialized) return;
+  const dbFile = accessLogFile();
   try {
-    await fs.mkdir(DATA_DIR, { recursive: true });
+    await fs.mkdir(path.dirname(dbFile), { recursive: true });
     try {
-      const fileData = await fs.readFile(DB_FILE, 'utf-8');
+      const fileData = await fs.readFile(dbFile, 'utf-8');
       memoryLogs = JSON.parse(fileData);
       if (!Array.isArray(memoryLogs)) {
         memoryLogs = [];
@@ -84,13 +94,14 @@ async function persistLogs(): Promise<void> {
   hasPendingWrite = false;
 
   try {
-    await fs.mkdir(DATA_DIR, { recursive: true });
+    const dbFile = accessLogFile();
+    await fs.mkdir(path.dirname(dbFile), { recursive: true });
     const payload = JSON.stringify(memoryLogs, null, 2);
-    const tempFile = path.join(DATA_DIR, `.access_logs.${Date.now()}_${crypto.randomBytes(8).toString('hex')}.tmp`);
+    const tempFile = path.join(path.dirname(dbFile), `.access_logs.${Date.now()}_${crypto.randomBytes(8).toString('hex')}.tmp`);
 
     try {
       await fs.writeFile(tempFile, payload, 'utf-8');
-      await fs.rename(tempFile, DB_FILE);
+      await fs.rename(tempFile, dbFile);
     } catch (renameErr) {
       // Clean up temp file if rename failed
       try {
@@ -99,7 +110,7 @@ async function persistLogs(): Promise<void> {
         // Ignore unlink error
       }
       // Fallback to direct write to avoid ENOENT/filesystem locking issues
-      await fs.writeFile(DB_FILE, payload, 'utf-8');
+      await fs.writeFile(dbFile, payload, 'utf-8');
     }
   } catch (err) {
     console.error("[AccessLogDb] Failed to write access log database to disk:", err);

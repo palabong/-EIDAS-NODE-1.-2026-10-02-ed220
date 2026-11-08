@@ -10,6 +10,7 @@
 import { jsPDF } from 'jspdf';
 import type { BilanxValidationEnvelope, CitizenIngestionProfile } from './e2e/runSwissDemonstration.ts';
 import type { UhdRfidAssertion } from '../../types.ts';
+import { canonicalClearanceEnvelope } from '../../lib/crypto/clearanceEnvelope.ts';
 
 export function buildAuditCertificatePdfDoc(
   envelope: BilanxValidationEnvelope,
@@ -79,9 +80,11 @@ export function buildAuditCertificatePdfDoc(
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9.5);
   doc.setTextColor(100, 116, 139); // slate-500
+  const sessionLoa = envelope.verificationClaims.loa;
+  const loaName = sessionLoa === 'high' ? 'HIGH' : sessionLoa === 'substantial' ? 'SUBSTANTIAL' : 'LOW';
   doc.text(
     isItalian
-      ? 'Ricevuta Crittografica Verificabile eIDAS High / AgCom Delibera 9/24/CONS (Zero-PII)'
+      ? `Ricevuta Crittografica Verificabile eIDAS ${loaName} / AgCom Delibera 9/24/CONS (Zero-PII)`
       : 'Zero Data-Liability Retail Point-of-Sale Clearance Receipt (Swiss FADP / eIDAS 2.0)',
     15,
     45
@@ -113,18 +116,35 @@ export function buildAuditCertificatePdfDoc(
   const leftX = 15;
   let y = 70;
 
-  const productUid = rfidAssertion?.hardwareUid || envelope.merchantClearance?.productHardwareUid || envelope.productVerification?.hardwareUid || 'UID-9904-AUTH-951';
-  const productCategory = rfidAssertion?.category || envelope.merchantClearance?.productCategory || envelope.productVerification?.category || 'Tobacco';
-  const productAuthenticity = rfidAssertion 
-    ? (rfidAssertion.status === 'authentic' ? '[OK / AUTHENTIC]' : rfidAssertion.status === 'counterfeit' ? '[STOCK POLICY BLOCK: COUNTERFEIT DETECTED]' : '[STOCK POLICY BLOCK: RECALLED STOCK]')
-    : (envelope.merchantClearance?.productAuthenticity || envelope.productVerification?.verdict || '[OK / AUTHENTIC]');
+  const signedProduct = envelope.institutionalClearance?.envelope;
+  const signedRow = signedProduct?.productUid && signedProduct.productCategory && signedProduct.productStatus === 'authentic'
+    ? signedProduct
+    : undefined;
+  const productUid = signedRow?.productUid
+    || envelope.merchantClearance?.productHardwareUid
+    || envelope.productVerification?.hardwareUid
+    || rfidAssertion?.hardwareUid
+    || '';
+  const productCategory = signedRow?.productCategory
+    || envelope.merchantClearance?.productCategory
+    || envelope.productVerification?.category
+    || rfidAssertion?.category
+    || '';
+  const productAuthenticity = signedRow
+    ? (envelope.productVerification?.verdict || envelope.merchantClearance?.productAuthenticity || '[OK / AUTHENTIC]')
+    : rfidAssertion
+      ? (rfidAssertion.status === 'authentic' ? '[OK / AUTHENTIC]' : rfidAssertion.status === 'counterfeit' ? '[STOCK POLICY BLOCK: COUNTERFEIT DETECTED]' : '[STOCK POLICY BLOCK: RECALLED STOCK]')
+      : (envelope.merchantClearance?.productAuthenticity || envelope.productVerification?.verdict || '');
+  const loaText = sessionLoa === 'high' && isItalian
+    ? `${loaName} (eIDAS HIGH)`
+    : loaName;
 
   const metadataPairs: [string, string][] = [
     [isItalian ? 'ID Certificato:' : 'Envelope Token:', envelope.envelopeId],
     [isItalian ? 'Data e Ora Emissione:' : 'Issuance Timestamp:', envelope.timestamp],
     [isItalian ? 'Scadenza Token (TTL):' : 'Expiration Timestamp:', envelope.expiresAt],
     [isItalian ? 'Nodo Istituzionale:' : 'Issuing Node:', envelope.verificationClaims.issuerNode],
-    [isItalian ? 'Livello di Garanzia (LoA):' : 'Level of Assurance:', envelope.verificationClaims.loa.toUpperCase() + (isItalian ? ' (eIDAS HIGH)' : '')],
+    [isItalian ? 'Livello di Garanzia (LoA):' : 'Level of Assurance:', loaText],
     [isItalian ? 'Servizio / Prodotto:' : 'Restricted Product:', envelope.merchantClearance.productScanned || 'Restricted Retail Item'],
     [isItalian ? 'Hardware UID Prodotto:' : 'Product Hardware UID:', productUid],
     [isItalian ? 'Categoria Merceologica:' : 'Product Category:', productCategory],
@@ -160,14 +180,18 @@ export function buildAuditCertificatePdfDoc(
     [isItalian ? 'Challenge Istituzionale:' : 'Institutional Challenge:', cryptoReceipt.dualKeyChallengeId],
     [isItalian ? 'Firma Istituzionale Hash:' : 'Inst. Signature Digest:', cryptoReceipt.institutionalSignatureDigest],
     [isItalian ? 'ZKP Proof SHA-256:' : 'ZKP Proof SHA-256:', cryptoReceipt.zkpProofDigest],
-    [isItalian ? 'Dimensione Prova NIZKP:' : 'ZKP Binary Size:', `${cryptoReceipt.proofByteLength} Bytes (B2 8-Bit Sigma Range Proof)`]
+    [isItalian ? 'Dimensione Prova NIZKP:' : 'ZKP Binary Size:', `${cryptoReceipt.proofByteLength} Bytes (B2 8-Bit Sigma Range Proof)`],
+    [isItalian ? 'Hash Ricevuta SHA-256:' : 'Receipt SHA-256:', cryptoReceipt.auditReceiptHash || signedProduct?.receiptSha256 || ''],
+    [isItalian ? 'Firma Istituzionale:' : 'Institutional Signature:', envelope.institutionalClearance?.envelopeSignature || ''],
+    [isItalian ? 'Busta Canonica Firmata:' : 'Signed Envelope:', signedProduct ? canonicalClearanceEnvelope(signedProduct) : '']
   ];
 
   for (const [label, val] of cryptoPairs) {
     doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.5);
     doc.text(label, leftX, y);
     doc.setFont('courier', 'normal');
-    doc.setFontSize(8);
+    doc.setFontSize(val.length > 40 ? 6.5 : 8);
     doc.text(val, leftX + 46, y);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8.5);
@@ -246,7 +270,7 @@ export function buildAuditCertificatePdfDoc(
   }
 
   // 6. Section 4: Regulatory Citations & Verification Disclaimer
-  y += 45;
+  y += 40;
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9.5);
   doc.setTextColor(71, 85, 105);
@@ -262,7 +286,7 @@ export function buildAuditCertificatePdfDoc(
       "e un handshake crittografico Dual-Key vincolato a token hardware di sicurezza (FIDO2/CTAP2) sono stati verificati in tempo reale " +
       "dal Nodo Istituzionale AgCom BILANX-IT-AGCOM-NODE-01. La dichiarazione matematica dimostra che l'utente ha raggiunto la maggiore età (18+) " +
       "senza rivelare il nome, cognome, data di nascita o codice fiscale, in piena conformità con la Delibera AgCom 9/24/CONS " +
-      "e il Regolamento UE 910/2014 & 2024/1183 (eIDAS Livello di Sicurezza HIGH)."
+      `e il Regolamento UE 910/2014 & 2024/1183 (eIDAS Livello di Sicurezza ${loaName}).`
     : "This certificate verifies that an authentic Non-Interactive Zero-Knowledge Proof (NIZKP) and Dual-Key " +
       "cryptographic handshake were evaluated in real time by the Bilanx Institutional Node. The statement " +
       "proven demonstrates that the citizen's age meets or exceeds the statutory threshold of 18 years without " +
@@ -273,13 +297,13 @@ export function buildAuditCertificatePdfDoc(
 
   // 7. Footer
   doc.setDrawColor(226, 232, 240);
-  doc.line(15, 275, pageWidth - 15, 275);
+  doc.line(15, 286, pageWidth - 15, 286);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(7);
   doc.setTextColor(148, 163, 184);
   const footerNode = isItalian ? 'Bilanx AgCom Italian Institutional Node' : 'Bilanx DK-SVS Swiss Node';
-  doc.text(`Certificate Token: ${envelope.envelopeId} | Generated: ${new Date().toUTCString()} | ${footerNode}`, 15, 282);
-  doc.text('Page 1 of 1 — Cryptographically Verifiable Audit Receipt', pageWidth - 80, 282);
+  doc.text(`Certificate Token: ${envelope.envelopeId} | Generated: ${new Date().toUTCString()} | ${footerNode}`, 15, 292);
+  doc.text('Page 1 of 1 — Cryptographically Verifiable Audit Receipt', pageWidth - 80, 292);
 
   return doc;
 }

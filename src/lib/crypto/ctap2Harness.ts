@@ -419,6 +419,54 @@ export class Ctap2HardwareKeyHarness {
   }
 
   /**
+   * Builds a fresh assertion and leaves server verification to the caller.
+   * Clearance uses this so the UV flag and counter are checked in that request.
+   */
+  async prepareAssertion(params: {
+    baseUrl: string;
+    overrideCounter?: number;
+    tamperSignature?: boolean;
+    userVerified?: boolean;
+    fetchFn?: typeof fetch;
+  }): Promise<{
+    credentialId: string;
+    assertion: {
+      id: string;
+      rawId: string;
+      type: 'public-key';
+      authenticatorAttachment: 'cross-platform';
+      response: {
+        clientDataJSON: string;
+        authenticatorData: string;
+        signature: string;
+      };
+    };
+  }> {
+    if (!this.keyCredentials) throw new Error('CTAP2 key not registered');
+    const localFetch = params.fetchFn || fetch;
+    const resolveUrl = (path: string) => `${params.baseUrl.replace(/\/$/, '')}${path}`;
+    const parsedUrl = new URL(params.baseUrl);
+    const optRes = await localFetch(resolveUrl('/api/webauthn/authenticate-options'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ credentialId: this.keyCredentials.credentialId })
+    });
+    if (!optRes.ok) {
+      throw new Error(`Failed to fetch authentication options: ${optRes.statusText}`);
+    }
+    const options = await optRes.json();
+    const assertion = await this.getAssertion({
+      challenge: options.challenge,
+      rpId: parsedUrl.hostname,
+      origin: parsedUrl.origin,
+      userVerified: params.userVerified ?? true,
+      overrideCounter: params.overrideCounter,
+      tamperSignature: params.tamperSignature
+    });
+    return { credentialId: this.keyCredentials.credentialId, assertion };
+  }
+
+  /**
    * Performs an assertion verification against the server endpoints.
    */
   async authenticateWithServer(params: {

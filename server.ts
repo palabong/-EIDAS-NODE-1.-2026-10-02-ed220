@@ -22,7 +22,12 @@ export { createApp, validateStartupEnvironment };
  */
 export async function startServer(port: number = parseInt(process.env.PORT || '3000', 10)) {
   validateStartupEnvironment();
-  const app = createApp({ isTest: false });
+  // isTest stays false. The local demo still needs fixture citizens.
+  // NODE_ENV=production keeps preset minting closed on this same entrypoint.
+  const app = createApp({
+    isTest: false,
+    allowLocalDemoPresets: process.env.NODE_ENV !== 'production',
+  });
 
   // Integrate Vite dynamically in development mode, or serve static folder in production
   if (process.env.NODE_ENV !== "production") {

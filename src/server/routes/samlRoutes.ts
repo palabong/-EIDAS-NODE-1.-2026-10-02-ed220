@@ -200,7 +200,6 @@ export function mountSamlRoutes(app: express.Express, options?: { allowSamlPrese
         role: posContext.role,
         permissions: posContext.permissions,
         levelOfAssurance: posContext.level_of_assurance,
-        age: posContext.age,
         isOver18: posContext.is_over_18,
         isOver21: posContext.is_over_21,
         authenticatedAt: new Date().toISOString(),
@@ -224,7 +223,6 @@ export function mountSamlRoutes(app: express.Express, options?: { allowSamlPrese
         metadata: {
           loa: sessionUser.levelOfAssurance,
           role: sessionUser.role,
-          age: sessionUser.age,
           isOver18: sessionUser.isOver18,
           permissions: sessionUser.permissions,
         },
@@ -234,7 +232,6 @@ export function mountSamlRoutes(app: express.Express, options?: { allowSamlPrese
         role: posContext.role,
         permissions: posContext.permissions,
         level_of_assurance: posContext.level_of_assurance,
-        age: posContext.age,
         is_over_18: posContext.is_over_18,
         is_over_21: posContext.is_over_21,
       };

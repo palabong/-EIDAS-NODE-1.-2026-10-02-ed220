@@ -30,6 +30,8 @@ import {
 import { bytesToBase64, base64ToBytes, bytesToHex } from '../src/lib/crypto/encoding.ts';
 import { generateProof } from '../src/lib/crypto/zkp/nizkp.ts';
 import { clearanceMessage } from '../src/lib/crypto/clearanceMessage.ts';
+import { Ctap2HardwareKeyHarness, YUBIKEY_5_SERIES_AAGUID } from '../src/lib/crypto/ctap2Harness.ts';
+import { credentialSecondFactorHash } from '../src/server/clearance.ts';
 import { performDualKeyHandshake } from '../src/sandbox/hooks/useBilanxDualKeyValidation.real.ts';
 
 async function proofSha256Hex(proof: Uint8Array): Promise<string> {
@@ -77,6 +79,20 @@ async function runAdversarialTestSuite() {
 
   const port = (server.address() as AddressInfo).port;
   const baseUrl = `http://127.0.0.1:${port}`;
+
+  async function preparedClearanceFactor() {
+    const key = new Ctap2HardwareKeyHarness({ aaguid: YUBIKEY_5_SERIES_AAGUID });
+    await key.registerWithServer({
+      baseUrl,
+      username: `adversary-factor-${crypto.randomUUID()}@bilanx.org`,
+    });
+    const prepared = await key.prepareAssertion({ baseUrl });
+    return {
+      credentialId: prepared.credentialId,
+      assertion: prepared.assertion,
+      secondFactorHash: credentialSecondFactorHash(prepared.credentialId),
+    };
+  }
   console.log(`[TEST-ENV] Ephemeral test server active on ${baseUrl}\n`);
 
   const summary: TestSummary[] = [];
@@ -330,24 +346,38 @@ async function runAdversarialTestSuite() {
     const instChallengeData25 = await instChallengeRes25.json();
     const challengeStr25 = instChallengeData25.challenge;
 
-    const userSigB6425 = await signClearance(userKeyPair.privateKey, challengeStr25, authenticFp, policyProof);
+    const concurrentBound = await preparedClearanceFactor();
+    const userSigB6425 = await signClearance(userKeyPair.privateKey, challengeStr25, concurrentBound.secondFactorHash, policyProof);
 
     const concurrentPayload = {
       v: 1,
       challengeId: challengeStr25,
-      secondFactorHash: authenticFp,
+      secondFactorHash: concurrentBound.secondFactorHash,
+      credentialId: concurrentBound.credentialId,
+      webauthnAssertion: concurrentBound.assertion,
       userPublicKey: userPublicKeyJwk,
       userSignature: userSigB6425,
       proofBase64: bytesToBase64(policyProof),
       institutionalSignature: instChallengeData25.signatureBase64
     };
 
+    const adultAcs = await fetch(`${baseUrl}/saml/acs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preset: 'swiss_adult' }),
+    });
+    const adultSetCookie = typeof adultAcs.headers.getSetCookie === 'function' ? adultAcs.headers.getSetCookie() : [];
+    const adultCookie = adultSetCookie.map((line) => line.split(';', 1)[0]).join('; ');
+    if (!adultAcs.ok || !adultCookie.includes('session_token=')) {
+      throw new Error(`ACS swiss_adult did not set a session (${adultAcs.status})`);
+    }
+    const sessionHeaders = { 'Content-Type': 'application/json', Cookie: adultCookie };
     const concurrentResults = await Promise.all([
-      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
-      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
-      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
-      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
-      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: sessionHeaders, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: sessionHeaders, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: sessionHeaders, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: sessionHeaders, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
+      fetch(`${baseUrl}/api/v1/dual-key/verify`, { method: 'POST', headers: sessionHeaders, body: JSON.stringify(concurrentPayload) }).then(r => r.json()),
     ]);
     const validCount = concurrentResults.filter(r => r.valid === true).length;
     const replayCount = concurrentResults.filter(r => r.valid === false && r.reason?.includes('Replay detected')).length;
@@ -671,7 +701,8 @@ async function runAdversarialTestSuite() {
       body: JSON.stringify({ institutionId: 'BILANX-CH-EIDAS-NODE-01' })
     }).then(r => r.json());
     const retryProof = validProofBytes;
-    const retryGoodSig = await signClearance(userKeyPair.privateKey, retryIssued.challenge, authenticFp, retryProof);
+    const retryBound = await preparedClearanceFactor();
+    const retryGoodSig = await signClearance(userKeyPair.privateKey, retryIssued.challenge, retryBound.secondFactorHash, retryProof);
     const retryBadRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -688,11 +719,13 @@ async function runAdversarialTestSuite() {
     const retryBadData = await retryBadRes.json();
     const retryGoodRes = await fetch(`${baseUrl}/api/v1/dual-key/verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: sessionHeaders,
       body: JSON.stringify({
         v: 1,
         challengeId: retryIssued.challenge,
-        secondFactorHash: authenticFp,
+        secondFactorHash: retryBound.secondFactorHash,
+        credentialId: retryBound.credentialId,
+        webauthnAssertion: retryBound.assertion,
         userPublicKey: userPublicKeyJwk,
         userSignature: retryGoodSig,
         proofBase64: bytesToBase64(retryProof),

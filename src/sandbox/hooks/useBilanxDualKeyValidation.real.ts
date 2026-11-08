@@ -3,6 +3,8 @@ import { KpiTelemetry } from '../../lib/KpiTelemetry';
 import { useDualKeyResult } from '../context/DualKeyResultContext';
 import { bufferToHex, base64ToBuffer, bufferToBase64Url, bytesToBase64 } from '../../lib/crypto/encoding';
 import { clearanceMessage } from '../../lib/crypto/clearanceMessage';
+import type { ClearanceEnvelope } from '../../lib/crypto/clearanceEnvelope';
+import { Ctap2HardwareKeyHarness, YUBIKEY_5_SERIES_AAGUID } from '../../lib/crypto/ctap2Harness';
 import { generateProof } from '../../lib/crypto/zkp/nizkp';
 
 export type HandshakeState = 
@@ -13,14 +15,25 @@ export type HandshakeState =
   | 'COMPLETED' 
   | 'FAILED';
 
+export interface WebAuthnClearanceAssertion {
+  id?: string;
+  response: {
+    clientDataJSON: string;
+    authenticatorData: string;
+    signature: string;
+  };
+}
+
 export interface DualKeyPayload {
   v: 1;
   challengeId: string;
-  secondFactorHash: string;          // hex lowercase SHA-256
+  secondFactorHash: string;          // SHA-256 of the WebAuthn credential id
   userPublicKey: JsonWebKey;         // EC P-256, x + y only (no d)
   userSignature: string;             // base64url, no padding
   institutionalSignature?: string;   // base64 institutional signature over challengeId; not an acceptance input
   proofBase64?: string;              // 1,355-byte range proof, required for server clearance
+  credentialId?: string;             // registered authenticator checked in this clearance
+  webauthnAssertion?: WebAuthnClearanceAssertion;
   clientTs?: string;                 // optional, NOT part of signed message
 }
 
@@ -32,6 +45,9 @@ export interface DualKeyValidationResult {
   userSignatureValid: boolean;
   bindingValid: boolean;
   payload?: DualKeyPayload;
+  serverEnvelope?: ClearanceEnvelope;
+  envelopeSignature?: string;
+  sessionPolicyEnforced?: boolean;
   serverVerifyMs?: number;
   error?: string;
   logs?: string[];
@@ -197,10 +213,22 @@ async function deleteKeyPair(id: string): Promise<boolean> {
 export async function performDualKeyHandshake(
   institutionId: string,
   secondFactorId: string,
-  options?: { fetchFn?: typeof fetch; baseUrl?: string; proofBytes?: Uint8Array } | typeof fetch
+  options?: {
+    fetchFn?: typeof fetch;
+    baseUrl?: string;
+    proofBytes?: Uint8Array;
+    productUid?: string;
+    credentialId?: string;
+    webauthnAssertion?: WebAuthnClearanceAssertion;
+  } | typeof fetch
 ): Promise<DualKeyValidationResult & { coreCryptoTime: number }> {
   const localFetch = typeof options === 'function' ? options : (options?.fetchFn || fetch);
   const proofBytes = typeof options === 'object' ? options?.proofBytes : undefined;
+  const productUid = typeof options === 'object' && typeof options?.productUid === 'string' && options.productUid.length > 0
+    ? options.productUid
+    : undefined;
+  const suppliedCredentialId = typeof options === 'object' ? options?.credentialId : undefined;
+  const suppliedAssertion = typeof options === 'object' ? options?.webauthnAssertion : undefined;
   const baseUrl = (typeof options === 'object' && options?.baseUrl) || (typeof window !== 'undefined' && window.location ? window.location.origin : '');
   const resolveUrl = (path: string) => baseUrl ? `${baseUrl.replace(/\/$/, '')}${path}` : path;
 
@@ -294,9 +322,24 @@ export async function performDualKeyHandshake(
     
     logs.push('User: Received challenge. Preparing bound payload...');
     
-    const secondFactorBuffer = new TextEncoder().encode(secondFactorId);
+    let credentialId = suppliedCredentialId;
+    let webauthnAssertion = suppliedAssertion;
+    if (!credentialId || !webauthnAssertion) {
+      if (!baseUrl) {
+        throw new Error('Clearance second factor requires the institutional node origin');
+      }
+      const factorKey = new Ctap2HardwareKeyHarness({ aaguid: YUBIKEY_5_SERIES_AAGUID });
+      await factorKey.registerWithServer({
+        baseUrl,
+        username: `clearance-${crypto.randomUUID()}@bilanx.org`,
+        fetchFn: localFetch,
+      });
+      const prepared = await factorKey.prepareAssertion({ baseUrl, fetchFn: localFetch });
+      credentialId = prepared.credentialId;
+      webauthnAssertion = prepared.assertion;
+    }
     t0 = performance.now();
-    const secondFactorHashBuffer = await crypto.subtle.digest('SHA-256', secondFactorBuffer);
+    const secondFactorHashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(credentialId));
     coreCryptoTime += performance.now() - t0;
     const secondFactorHashHex = bufferToHex(secondFactorHashBuffer);
 
@@ -337,6 +380,10 @@ export async function performDualKeyHandshake(
     let payload: DualKeyPayload | undefined;
     
     let serverVerifyMs: number | undefined;
+    let serverEnvelope: ClearanceEnvelope | undefined;
+    let envelopeSignature: string | undefined;
+    let sessionPolicyEnforced = false;
+    let serverError: string | undefined;
     
     if (isInstSigValid) {
       const jwk = await crypto.subtle.exportKey('jwk', userKeyPair.publicKey);
@@ -356,6 +403,8 @@ export async function performDualKeyHandshake(
         userSignature: bufferToBase64Url(userSignatureBuffer),
         institutionalSignature: challengeData.signatureBase64,
         proofBase64,
+        credentialId,
+        webauthnAssertion,
         clientTs: new Date().toISOString()
       };
 
@@ -382,18 +431,26 @@ export async function performDualKeyHandshake(
         const verifyRes = await localFetch(resolveUrl('/api/v1/dual-key/verify'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          // productUid is catalog input. It is not part of the user-signed clearance message.
+          body: JSON.stringify(productUid ? { ...payload, productUid } : payload)
         });
         serverVerifyMs = performance.now() - verifyStart;
         
         if (verifyRes.ok) {
           const verifyData = await verifyRes.json();
-          if (verifyData.valid) {
+          if (verifyData.valid && verifyData.envelope && typeof verifyData.envelopeSignature === 'string') {
             isUserSigValid = true;
             isBindingValid = true;
+            serverEnvelope = verifyData.envelope;
+            envelopeSignature = verifyData.envelopeSignature;
+            sessionPolicyEnforced = verifyData.sessionPolicyEnforced === true;
             logs.push(`Verifier: Cryptographic binding SUCCESSFUL (Server Verified in ${Math.round(serverVerifyMs)}ms).`);
+          } else if (verifyData.valid) {
+            serverError = 'Institutional node did not return a signed clearance envelope.';
+            logs.push('Verifier: Server accepted the proof and did not return a signed envelope.');
           } else {
-            logs.push(`Verifier: Cryptographic binding FAILED (Server Rejected: ${verifyData.reason || 'Unknown'}).`);
+            serverError = typeof verifyData.reason === 'string' ? verifyData.reason : 'Clearance rejected by the institutional node';
+            logs.push(`Verifier: Cryptographic binding FAILED (Server Rejected: ${serverError}).`);
           }
         } else {
           logs.push(`Verifier: Server error during verification (HTTP ${verifyRes.status}).`);
@@ -419,7 +476,11 @@ export async function performDualKeyHandshake(
       userSignatureValid: isUserSigValid,
       bindingValid: isBindingValid,
       payload,
+      serverEnvelope,
+      envelopeSignature,
+      sessionPolicyEnforced,
       serverVerifyMs,
+      error: isBindingValid ? undefined : serverError,
       logs,
       coreCryptoTime
     };
