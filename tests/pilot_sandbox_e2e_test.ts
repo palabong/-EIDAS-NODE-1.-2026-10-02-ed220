@@ -549,6 +549,45 @@ async function runPilotVerificationSuite() {
       prodDemoServer.close();
     }
 
+    const previousPilotEnv = process.env.NODE_ENV;
+    const previousPilotFlag = process.env.ALLOW_PILOT_DEMO;
+    process.env.NODE_ENV = 'production';
+    process.env.ALLOW_PILOT_DEMO = 'true';
+    const pilotDemoApp = createApp();
+    if (previousPilotEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousPilotEnv;
+    if (previousPilotFlag === undefined) delete process.env.ALLOW_PILOT_DEMO;
+    else process.env.ALLOW_PILOT_DEMO = previousPilotFlag;
+    const pilotDemoServer = createServer(pilotDemoApp);
+    await new Promise<void>((resolve) => {
+      pilotDemoServer.listen(0, '127.0.0.1', () => resolve());
+    });
+    const pilotDemoUrl = `http://127.0.0.1:${(pilotDemoServer.address() as AddressInfo).port}`;
+    try {
+      const pilotDemoRes = await fetch(`${pilotDemoUrl}/saml/acs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset: 'swiss_adult' })
+      });
+      const pilotDemoBody = await pilotDemoRes.json();
+      const pilotUnknown = await fetch(`${pilotDemoUrl}/saml/acs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset: 'not-a-real-preset' })
+      });
+      const pilotUnknownBody = await pilotUnknown.json();
+      record(
+        pilotDemoRes.status === 200 &&
+        pilotDemoBody.success === true &&
+        pilotDemoBody.user?.age === undefined &&
+        pilotUnknown.status === 400 &&
+        String(pilotUnknownBody.error).includes('Unknown SAML preset'),
+        `0.8 ALLOW_PILOT_DEMO mints a known citizen in production and still rejects an unknown preset (${pilotDemoRes.status}, ${pilotUnknown.status})`
+      );
+    } finally {
+      pilotDemoServer.close();
+    }
+
     const ageAcs = await fetch(`${baseUrl}/saml/acs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -804,6 +843,32 @@ async function runPilotVerificationSuite() {
       attestationFmt: 'none'
     });
     record(noneReg.verified === true, '1.18 Sandbox accepts fmt none for the software enclave');
+
+    const previousPilotAttestationFlag = process.env.ALLOW_PILOT_DEMO;
+    const previousPilotAttestationEnv = process.env.NODE_ENV;
+    process.env.ALLOW_PILOT_DEMO = 'true';
+    process.env.NODE_ENV = 'production';
+    let pilotNoneAccepted = false;
+    try {
+      const pilotNone = new Ctap2HardwareKeyHarness({ aaguid: YUBIKEY_5_SERIES_AAGUID });
+      const pilotNoneReg = await pilotNone.registerWithServer({
+        baseUrl,
+        username: `fmt-none-pilot-${crypto.randomUUID()}@bilanx.org`,
+        attestationFmt: 'none'
+      });
+      pilotNoneAccepted = pilotNoneReg.verified === true;
+    } catch {
+      pilotNoneAccepted = false;
+    } finally {
+      if (previousPilotAttestationFlag === undefined) delete process.env.ALLOW_PILOT_DEMO;
+      else process.env.ALLOW_PILOT_DEMO = previousPilotAttestationFlag;
+      if (previousPilotAttestationEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousPilotAttestationEnv;
+    }
+    record(
+      pilotNoneAccepted,
+      '1.18b ALLOW_PILOT_DEMO accepts the software enclave while production mode is on'
+    );
 
     const previousAttestationEnv = process.env.NODE_ENV;
     process.env.NODE_ENV = 'production';

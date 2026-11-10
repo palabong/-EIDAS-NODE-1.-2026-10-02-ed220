@@ -8,7 +8,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-import { isOriginAllowedCors } from './httpShared.ts';
+import { isOriginAllowedCors, pilotDemoEnabled } from './httpShared.ts';
 import { getInstitutionalKeyPair } from './institutionalKey.ts';
 import { clearanceMetricsSnapshot } from './clearanceAudit.ts';
 
@@ -63,6 +63,10 @@ export function validateStartupEnvironment(): void {
     console.log('[Config] Notice: GEMINI_API_KEY is unset or using a placeholder. AI features will remain dormant.');
   }
 
+  if (pilotDemoEnabled()) {
+    console.log('[Config] Pilot demo fixtures are enabled for this sandbox.');
+  }
+
   // Check Institutional Key
   const hasEnvKey = !!process.env.INSTITUTIONAL_KEY_JSON;
   const hasKeyPath = !!process.env.INSTITUTIONAL_KEY_PATH;
@@ -89,8 +93,12 @@ export interface CreateAppOptions {
   allowLocalDemoPresets?: boolean;
 }
 
-/** Preset minting is for the harness and the local demo server. Production always refuses. */
+/**
+ * Preset minting is for the harness, the local demo server, and a host that
+ * sets ALLOW_PILOT_DEMO=true. A production boot without that flag refuses.
+ */
 export function samlPresetsAllowed(options?: CreateAppOptions): boolean {
+  if (pilotDemoEnabled()) return true;
   if (process.env.NODE_ENV === 'production') return false;
   return options?.isTest === true || options?.allowLocalDemoPresets === true;
 }

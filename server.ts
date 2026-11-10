@@ -23,7 +23,7 @@ export { createApp, validateStartupEnvironment };
 export async function startServer(port: number = parseInt(process.env.PORT || '3000', 10)) {
   validateStartupEnvironment();
   // isTest stays false. The local demo still needs fixture citizens.
-  // NODE_ENV=production keeps preset minting closed on this same entrypoint.
+  // NODE_ENV=production keeps preset minting closed unless ALLOW_PILOT_DEMO=true.
   const app = createApp({
     isTest: false,
     allowLocalDemoPresets: process.env.NODE_ENV !== 'production',

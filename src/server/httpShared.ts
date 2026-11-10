@@ -48,6 +48,11 @@ declare global {
 // Google OAuth2 Client
 export const googleOAuthClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
+/** Hosted pilot sandbox. Production stays closed unless this is set explicitly. */
+export function pilotDemoEnabled(): boolean {
+  return process.env.ALLOW_PILOT_DEMO === 'true';
+}
+
 export const TRUSTED_ORIGINS = new Set([
   process.env.APP_ORIGIN,
   'http://localhost:3000',

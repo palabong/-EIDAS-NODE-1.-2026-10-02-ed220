@@ -26,9 +26,13 @@ function resolveSpCertificatePem(): string {
     encoding: 'utf-8',
   });
   if (pyRes.status === 0 && pyRes.stdout && pyRes.stdout.includes('BEGIN CERTIFICATE')) {
-    return pyRes.stdout.trim();
+    const pemStart = pyRes.stdout.indexOf('-----BEGIN CERTIFICATE-----');
+    return pemStart >= 0 ? pyRes.stdout.slice(pemStart).trim() : pyRes.stdout.trim();
   }
-  throw new Error('Unable to resolve SAML SP certificate from SAML_SP_CERT_PEM, SAML_SP_CERT_PATH, or ephemeral sandbox generator.');
+  const detail = (pyRes.stderr || pyRes.error?.message || '').trim().slice(0, 500);
+  throw new Error(
+    `Unable to resolve SAML SP certificate from SAML_SP_CERT_PEM, SAML_SP_CERT_PATH, or ephemeral sandbox generator.${detail ? ` ${detail}` : ''}`
+  );
 }
 
 export const SP_CERT_PEM = resolveSpCertificatePem();

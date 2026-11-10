@@ -17,6 +17,7 @@
  */
 
 import crypto from 'crypto';
+import { pilotDemoEnabled } from './httpShared.ts';
 import { CapacityExceededError } from './httpShared.ts';
 import { bindDurableStore, openDurableMap, type DurableStore } from './durableStore.ts';
 import { recordClearanceAudit } from './clearanceAudit.ts';
@@ -487,7 +488,7 @@ export function registerWebAuthnCredential(
     if (attestationFormat === 'none') {
       // fmt:none has no signature. The sandbox uses it for the software enclave.
       // Production refuses it. A FIDO MDS pin is not part of this node.
-      if (process.env.NODE_ENV === 'production') {
+      if (process.env.NODE_ENV === 'production' && !pilotDemoEnabled()) {
         throw new Error('Attestation format none is test-only');
       }
     } else if (attestationFormat === 'packed') {
@@ -547,7 +548,7 @@ export function registerWebAuthnCredential(
         // Packed self-attestation is the sandbox software key. Production refuses it.
         // A packed x5c chain above is checked for time and link signatures only.
         // Pinning that chain to a manufacturer MDS root stays outside this repository.
-        if (process.env.NODE_ENV === 'production') {
+        if (process.env.NODE_ENV === 'production' && !pilotDemoEnabled()) {
           throw new Error('Packed self-attestation is test-only');
         }
         try {

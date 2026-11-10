@@ -19,6 +19,9 @@ primary_region = 'fra'
   NODE_ENV = 'production'
   PORT = '3000'
   APP_ORIGIN = 'https://eidas-node-1-2026-10-02-ed220-black-water-1048.fly.dev'
+  # Hosted sandbox. Known demo citizens and the software authenticator stay available.
+  # A production boot without this flag still refuses both.
+  ALLOW_PILOT_DEMO = 'true'
 
 [http_service]
   internal_port = 3000

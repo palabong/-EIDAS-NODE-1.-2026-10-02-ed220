@@ -6,7 +6,7 @@ import base64
 import hashlib
 import tempfile
 import subprocess
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 import xml.etree.ElementTree as ET
 
 from .namespaces import NS_DS
