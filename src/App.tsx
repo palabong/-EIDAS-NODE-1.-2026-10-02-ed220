@@ -33,14 +33,23 @@ import { GoogleAuthGate } from './components/GoogleAuthGate';
 import { AccessLogAuditModal } from './components/AccessLogAuditModal';
 import { LegalPage } from './components/LegalPages';
 
-function detectLegalRoute(pathname: string): 'privacy' | 'terms' | null {
-  const clean = pathname.toLowerCase().replace(/\/+$/, '');
+function detectLegalRoute(loc?: Pick<Location, 'pathname' | 'search' | 'hash'>): 'privacy' | 'terms' | null {
+  if (!loc) return null;
+  const clean = (loc.pathname || '').toLowerCase().replace(/\/+$/, '');
   if (clean === '/privacy' || clean === '/privacy.html' || clean === '/privacy-policy') {
     return 'privacy';
   }
   if (clean === '/terms' || clean === '/terms.html' || clean === '/terms-of-service') {
     return 'terms';
   }
+  const params = new URLSearchParams(loc.search || '');
+  const viewParam = (params.get('page') || params.get('view') || '').toLowerCase();
+  if (viewParam === 'privacy' || viewParam === 'privacy-policy') return 'privacy';
+  if (viewParam === 'terms' || viewParam === 'terms-of-service') return 'terms';
+
+  const hash = (loc.hash || '').toLowerCase().replace(/^#\/?/, '');
+  if (hash === 'privacy' || hash === 'privacy-policy') return 'privacy';
+  if (hash === 'terms' || hash === 'terms-of-service') return 'terms';
   return null;
 }
 
@@ -58,15 +67,19 @@ export default function App() {
 
   const [showAuditModal, setShowAuditModal] = useState(false);
   const [legalRoute, setLegalRoute] = useState<'privacy' | 'terms' | null>(() =>
-    typeof window !== 'undefined' ? detectLegalRoute(window.location.pathname) : null
+    typeof window !== 'undefined' ? detectLegalRoute(window.location) : null
   );
 
   useEffect(() => {
-    const onPopState = () => {
-      setLegalRoute(detectLegalRoute(window.location.pathname));
+    const onLocationChange = () => {
+      setLegalRoute(detectLegalRoute(window.location));
     };
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
+    window.addEventListener('popstate', onLocationChange);
+    window.addEventListener('hashchange', onLocationChange);
+    return () => {
+      window.removeEventListener('popstate', onLocationChange);
+      window.removeEventListener('hashchange', onLocationChange);
+    };
   }, []);
 
   if (legalRoute) {
@@ -100,6 +113,7 @@ export default function App() {
           onClearError={clearAuthError}
           onInstantVerify={loginWithGoogleCredential}
           onOpenAuditLogs={() => setShowAuditModal(true)}
+          onOpenLegalPage={(page) => setLegalRoute(page)}
         />
         <AccessLogAuditModal
           isOpen={showAuditModal}
@@ -114,7 +128,8 @@ export default function App() {
       <BilanxApp 
         user={user} 
         logout={logout} 
-        onOpenAuditLogs={() => setShowAuditModal(true)} 
+        onOpenAuditLogs={() => setShowAuditModal(true)}
+        onOpenLegalPage={(page) => setLegalRoute(page)}
       />
       <AccessLogAuditModal
         isOpen={showAuditModal}
@@ -127,11 +142,13 @@ export default function App() {
 function BilanxApp({ 
   user, 
   logout, 
-  onOpenAuditLogs 
+  onOpenAuditLogs,
+  onOpenLegalPage
 }: { 
   user: VerifiedGoogleUser; 
   logout: () => void; 
-  onOpenAuditLogs: () => void; 
+  onOpenAuditLogs: () => void;
+  onOpenLegalPage: (page: 'privacy' | 'terms') => void;
 }) {
 
   // Application Data States (hydrated from localStorage if available)
@@ -461,11 +478,27 @@ function BilanxApp({
         
         <div className="flex flex-col sm:flex-row items-center gap-4 text-center sm:text-right">
           <nav aria-label="Institutional legal links" className="flex items-center gap-3 text-[11px] font-mono font-bold">
-            <a href="/privacy" className="text-[#0B3B60] hover:underline">
+            <a
+              href="/privacy"
+              onClick={(e) => {
+                e.preventDefault();
+                try { window.history.pushState({}, '', '/privacy'); } catch {}
+                onOpenLegalPage('privacy');
+              }}
+              className="text-[#0B3B60] hover:underline"
+            >
               Privacy Policy
             </a>
             <span className="text-slate-300" aria-hidden="true">|</span>
-            <a href="/terms" className="text-[#0B3B60] hover:underline">
+            <a
+              href="/terms"
+              onClick={(e) => {
+                e.preventDefault();
+                try { window.history.pushState({}, '', '/terms'); } catch {}
+                onOpenLegalPage('terms');
+              }}
+              className="text-[#0B3B60] hover:underline"
+            >
               Terms of Service
             </a>
           </nav>

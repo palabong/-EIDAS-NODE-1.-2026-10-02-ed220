@@ -14,6 +14,7 @@ interface GoogleAuthGateProps {
   onClearError: () => void;
   onInstantVerify: (email?: string, name?: string) => Promise<VerifiedGoogleUser>;
   onOpenAuditLogs: () => void;
+  onOpenLegalPage?: (page: 'privacy' | 'terms') => void;
 }
 
 export function GoogleAuthGate({
@@ -21,10 +22,23 @@ export function GoogleAuthGate({
   isVerifying,
   authError,
   onClearError,
-  onOpenAuditLogs
+  onOpenAuditLogs,
+  onOpenLegalPage
 }: GoogleAuthGateProps) {
   const [gsiLoaded, setGsiLoaded] = useState(false);
   const buttonContainerRef = useRef<HTMLDivElement>(null);
+
+  const handleLegalClick = (page: 'privacy' | 'terms') => (e: React.MouseEvent<HTMLAnchorElement>) => {
+    if (onOpenLegalPage) {
+      e.preventDefault();
+      try {
+        window.history.pushState({}, '', `/${page}`);
+      } catch {
+        // Ignore history pushState error in sandboxed iframes
+      }
+      onOpenLegalPage(page);
+    }
+  };
 
   // Initialize official Google Identity Services client via build env or runtime /api/auth/config
   useEffect(() => {
@@ -138,6 +152,9 @@ export function GoogleAuthGate({
           </div>
 
           <h1 className="text-2xl font-bold text-white tracking-tight">Project Bilanx — Credentials Hub</h1>
+          <p className="text-[11px] font-mono text-blue-300/90 uppercase tracking-widest mt-1">
+            PROJECT BILANX / EIDAS-NODE 1.
+          </p>
           <p className="text-slate-400 text-xs mt-1.5 leading-relaxed">
             Sign in with your Google account via official OAuth 2.0 to access the Project Bilanx eIDAS 2.0 node &amp; DK-SVS compliance dashboard.
           </p>
@@ -183,11 +200,19 @@ export function GoogleAuthGate({
             </div>
             <p className="text-[11px] text-slate-400 leading-relaxed">
               OAuth 2.0 authentication verifies basic profile claims (<code className="text-slate-300">openid</code>, <code className="text-slate-300">email</code>, <code className="text-slate-300">profile</code>) and writes an immutable record into the local access log database in accordance with our{' '}
-              <a href="/privacy" className="text-blue-400 hover:text-blue-300 underline font-semibold">
+              <a
+                href="/privacy"
+                onClick={handleLegalClick('privacy')}
+                className="text-blue-400 hover:text-blue-300 underline font-semibold"
+              >
                 Privacy Policy
               </a>{' '}
               and{' '}
-              <a href="/terms" className="text-blue-400 hover:text-blue-300 underline font-semibold">
+              <a
+                href="/terms"
+                onClick={handleLegalClick('terms')}
+                className="text-blue-400 hover:text-blue-300 underline font-semibold"
+              >
                 Terms of Service
               </a>.
             </p>
@@ -225,31 +250,51 @@ export function GoogleAuthGate({
         </div>
 
         {/* Footer */}
-        <footer className="bg-slate-950 px-6 py-3.5 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 font-mono">
-          <span>Project Bilanx — Credentials Hub</span>
-          <nav aria-label="Footer legal and audit links" className="flex items-center gap-3">
+        <footer className="bg-slate-950 px-6 py-3.5 border-t border-slate-800 flex flex-col gap-2 text-[11px] text-slate-400 font-mono">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span>Project Bilanx — Credentials Hub</span>
+            <nav aria-label="Footer legal and audit links" className="flex items-center gap-3">
+              <a
+                href="/privacy"
+                onClick={handleLegalClick('privacy')}
+                className="text-blue-400 hover:text-blue-300 underline transition-colors"
+              >
+                Privacy Policy
+              </a>
+              <span className="text-slate-700" aria-hidden="true">·</span>
+              <a
+                href="/terms"
+                onClick={handleLegalClick('terms')}
+                className="text-blue-400 hover:text-blue-300 underline transition-colors"
+              >
+                Terms of Service
+              </a>
+              <span className="text-slate-700" aria-hidden="true">·</span>
+              <button
+                type="button"
+                onClick={onOpenAuditLogs}
+                className="text-slate-400 hover:text-white transition-colors cursor-pointer"
+              >
+                Audit Logs
+              </button>
+            </nav>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500 border-t border-slate-900 pt-1.5">
             <a
-              href="/privacy"
-              className="text-blue-400 hover:text-blue-300 underline transition-colors"
+              href="https://bilanx.ai.studio/privacy"
+              onClick={handleLegalClick('privacy')}
+              className="hover:text-blue-400 underline"
             >
-              Privacy Policy
+              bilanx.ai.studio/privacy
             </a>
-            <span className="text-slate-700" aria-hidden="true">·</span>
             <a
-              href="/terms"
-              className="text-blue-400 hover:text-blue-300 underline transition-colors"
+              href="https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app/privacy"
+              onClick={handleLegalClick('privacy')}
+              className="hover:text-blue-400 underline"
             >
-              Terms of Service
+              Cloud Run Privacy Policy
             </a>
-            <span className="text-slate-700" aria-hidden="true">·</span>
-            <button
-              type="button"
-              onClick={onOpenAuditLogs}
-              className="text-slate-400 hover:text-white transition-colors cursor-pointer"
-            >
-              Audit Logs
-            </button>
-          </nav>
+          </div>
         </footer>
 
       </main>

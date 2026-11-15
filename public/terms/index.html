@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Terms of Service — Project Bilanx — Credentials Hub (PROJECT BILANX / EIDAS-NODE 1.)</title>
+  <meta name="description" content="Terms of Service and Sandbox Evaluation Agreement for Project Bilanx — Credentials Hub (PROJECT BILANX / EIDAS-NODE 1. — DK-SVS eIDAS 2.0 Node Sandbox).">
+  <link rel="canonical" href="https://bilanx.ai.studio/terms">
+  <style>
+  :root {
+    --bg-page: #020617;
+    --bg-card: #0f172a;
+    --bg-elevated: #1e293b;
+    --border-subtle: #1e293b;
+    --border-accent: #3b82f6;
+    --text-primary: #f8fafc;
+    --text-secondary: #cbd5e1;
+    --text-muted: #94a3b8;
+    --accent-blue: #60a5fa;
+    --accent-emerald: #34d399;
+  }
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    background-color: var(--bg-page);
+    color: var(--text-secondary);
+    line-height: 1.65;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    background-color: rgba(15, 23, 42, 0.95);
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 1.25rem 1.5rem;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+  .header-inner {
+    max-width: 960px;
+    margin: 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+  }
+  .brand-identity {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    text-decoration: none;
+    color: var(--text-primary);
+  }
+  .brand-badge {
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 0.625rem;
+    background: rgba(59, 130, 246, 0.15);
+    border: 1px solid rgba(96, 165, 250, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent-blue);
+    font-weight: 800;
+    font-size: 1rem;
+  }
+  .brand-title {
+    font-weight: 800;
+    font-size: 1.05rem;
+    letter-spacing: -0.01em;
+    color: var(--text-primary);
+    display: block;
+  }
+  .brand-subtitle {
+    font-size: 0.7rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    display: block;
+  }
+  nav ul {
+    display: flex;
+    list-style: none;
+    gap: 1.25rem;
+    align-items: center;
+  }
+  nav a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.85rem;
+    font-weight: 600;
+    padding: 0.4rem 0.75rem;
+    border-radius: 0.375rem;
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+  nav a:hover,
+  nav a[aria-current="page"] {
+    background-color: var(--bg-elevated);
+    color: var(--accent-blue);
+  }
+  main {
+    flex: 1;
+    max-width: 960px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 2.5rem 1.5rem 4rem;
+  }
+  .hero-banner {
+    background-color: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-left: 4px solid var(--border-accent);
+    border-radius: 0.75rem;
+    padding: 2rem;
+    margin-bottom: 2rem;
+  }
+  .meta-pill {
+    display: inline-block;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.75rem;
+    color: var(--accent-blue);
+    background: rgba(59, 130, 246, 0.12);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    padding: 0.25rem 0.65rem;
+    border-radius: 9999px;
+    margin-bottom: 0.75rem;
+  }
+  h1 {
+    font-size: 2rem;
+    font-weight: 800;
+    color: var(--text-primary);
+    letter-spacing: -0.02em;
+    margin-bottom: 0.5rem;
+  }
+  h2 {
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin: 2.25rem 0 0.85rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  h3 {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--accent-blue);
+    margin: 1.35rem 0 0.5rem;
+  }
+  p {
+    margin-bottom: 1rem;
+    color: var(--text-secondary);
+  }
+  ul, ol {
+    margin: 0.5rem 0 1.25rem 1.5rem;
+    color: var(--text-secondary);
+  }
+  li {
+    margin-bottom: 0.5rem;
+  }
+  strong {
+    color: var(--text-primary);
+  }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.85em;
+    background-color: var(--bg-elevated);
+    color: var(--accent-blue);
+    padding: 0.15rem 0.4rem;
+    border-radius: 0.25rem;
+  }
+  .callout-box {
+    background-color: rgba(16, 185, 129, 0.08);
+    border: 1px solid rgba(52, 211, 153, 0.3);
+    border-radius: 0.625rem;
+    padding: 1.25rem 1.5rem;
+    margin: 1.5rem 0;
+  }
+  .callout-title {
+    color: var(--accent-emerald);
+    font-weight: 700;
+    font-size: 0.95rem;
+    margin-bottom: 0.4rem;
+    display: block;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1.25rem 0 1.75rem;
+    background-color: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    font-size: 0.9rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.85rem 1rem;
+    border-bottom: 1px solid var(--border-subtle);
+    vertical-align: top;
+  }
+  th {
+    background-color: var(--bg-elevated);
+    color: var(--text-primary);
+    font-weight: 700;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  a {
+    color: var(--accent-blue);
+  }
+  footer {
+    background-color: var(--bg-card);
+    border-top: 1px solid var(--border-subtle);
+    padding: 2rem 1.5rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+  .footer-inner {
+    max-width: 960px;
+    margin: 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+  }
+  .footer-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.25rem;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <a href="/" class="brand-identity">
+        <span class="brand-badge" aria-hidden="true">BX</span>
+        <span>
+          <span class="brand-title">Project Bilanx — Credentials Hub</span>
+          <span class="brand-subtitle">PROJECT BILANX / EIDAS-NODE 1. · DK-SVS eIDAS 2.0 Node Sandbox</span>
+        </span>
+      </a>
+      <nav aria-label="Primary legal navigation">
+        <ul>
+          <li><a href="/">Home &amp; Application</a></li>
+          <li><a href="/privacy">Privacy Policy</a></li>
+          <li><a href="/terms" aria-current="page">Terms of Service</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="hero-banner">
+      <span class="meta-pill">EFFECTIVE DATE: November 15, 2026 · REGULATORY SANDBOX TERMS</span>
+      <h1>Terms of Service — Project Bilanx — Credentials Hub</h1>
+      <p>
+        These Terms of Service ("Terms") govern your access to and use of <strong>Project Bilanx — Credentials Hub</strong>
+        (<strong>PROJECT BILANX / EIDAS-NODE 1.</strong>, the "Service"), a TRL 4 cryptographic evaluation sandbox for the Dual-Key
+        Sovereign Validation System (DK-SVS) and eIDAS 2.0 / FIDO2 age-verification protocols operated by Daniele Palagi ("Project Bilanx").
+      </p>
+    </div>
+
+    <h2>1. Nature of the Service &amp; TRL 4 Sandbox Scope</h2>
+    <p>
+      <strong>Project Bilanx — Credentials Hub</strong> provides an interactive technical demonstration and cryptographic verification
+      laboratory implementing ECDSA P-256 institutional binding, Pedersen commitments, 8-bit NIZKP range proofs (Scheme B2),
+      WebAuthn / FIDO2 hardware-bound assertions, and SAML 2.0 eIDAS node interoperability fixtures.
+    </p>
+    <ul>
+      <li>The Service is provided as a <strong>TRL 4 laboratory and pilot evaluation environment</strong> across <a href="https://bilanx.ai.studio">https://bilanx.ai.studio</a> and <a href="https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app">https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app</a>.</li>
+      <li>Synthetic citizen profiles (e.g., Swiss Sovereign Sandbox and Italian CIE pilot fixtures) are strictly for technical evaluation and compliance testing.</li>
+    </ul>
+
+    <h2>2. Account Authentication &amp; Acceptable Use</h2>
+    <p>
+      Access to authenticated operator telemetry and audit logs requires signing in via Google OAuth 2.0 or using the designated offline evaluator sandbox mode. By accessing the Service, you agree not to:
+    </p>
+    <ul>
+      <li>Attempt to bypass cryptographic verification checks, rate limits, or session authentication controls outside of documented adversarial stress-testing harnesses.</li>
+      <li>Submit unlawful, fraudulent, or unauthorized third-party personal data to the Service.</li>
+      <li>Misrepresent synthetic sandbox clearance receipts as live government-issued legal clearances in production commerce without an executed institutional integration agreement.</li>
+    </ul>
+
+    <h2>3. Intellectual Property &amp; Open Standards</h2>
+    <p>
+      The Dual-Key Sovereign Validation System (DK-SVS) architecture, documentation, and custom implementation code are the intellectual property of Project Bilanx / Daniele Palagi, licensed where marked under Apache-2.0 or applicable evaluation agreements.
+    </p>
+
+    <h2>4. Privacy &amp; Data Protection</h2>
+    <p>
+      Your use of the Service is subject to our <a href="/privacy">Privacy Policy</a>, which details our compliance with the Google API Services User Data Policy, GDPR, and Swiss nFADP.
+    </p>
+
+    <h2>5. Disclaimer of Warranties &amp; Limitation of Liability</h2>
+    <p>
+      THE SERVICE IS PROVIDED "AS IS" AND "AS AVAILABLE" FOR CRYPTOGRAPHIC EVALUATION AND COMPLIANCE DEMONSTRATION WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED. TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, PROJECT BILANX SHALL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING FROM YOUR USE OF THE SANDBOX.
+    </p>
+
+    <h2>6. Governing Law &amp; Contact</h2>
+    <p>
+      These Terms are governed by the laws of Italy and applicable European Union regulations. For legal or technical inquiries, contact <a href="mailto:daniele.palagi92@gmail.com">daniele.palagi92@gmail.com</a>.
+    </p>
+  </main>
+
+  <footer>
+    <div class="footer-inner">
+      <div>
+        <strong>Project Bilanx — Credentials Hub</strong> (PROJECT BILANX / EIDAS-NODE 1.) · Sovereign eIDAS 2.0 &amp; Dual-Key Validation System (DK-SVS)
+      </div>
+      <ul class="footer-links">
+        <li><a href="/">Home</a></li>
+        <li><a href="/privacy">Privacy Policy</a></li>
+        <li><a href="/terms">Terms of Service</a></li>
+        <li><a href="mailto:daniele.palagi92@gmail.com">Contact</a></li>
+      </ul>
+    </div>
+  </footer>
+</body>
+</html>

@@ -6,16 +6,21 @@
 import express from 'express';
 
 export const APP_BRAND_NAME = 'Project Bilanx — Credentials Hub';
+export const APP_NODE_ID = 'PROJECT BILANX / EIDAS-NODE 1.';
 export const APP_SHORT_NAME = 'Project Bilanx';
 export const EFFECTIVE_DATE = 'November 15, 2026';
 export const CONTACT_EMAIL = 'daniele.palagi92@gmail.com';
+export const AI_STUDIO_HOME_URL = 'https://bilanx.ai.studio';
+export const AI_STUDIO_SANDBOX_URL = 'https://ai.studio/apps/52affc3b-2293-4cf0-bd6c-6b6cdc3a926a';
+export const CLOUD_RUN_SERVICE_URL = 'https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app';
+export const GITHUB_REPO_URL = 'https://github.com/palabong/-EIDAS-NODE-1.-2026-10-02-ed220';
 
 function resolveBaseOrigin(req: express.Request): string {
   if (process.env.APP_ORIGIN) {
     return process.env.APP_ORIGIN.replace(/\/+$/, '');
   }
   const proto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() || req.protocol || 'https';
-  const host = req.get('host') || 'bilanx.expert';
+  const host = req.get('host') || 'bilanx.ai.studio';
   return `${proto}://${host}`;
 }
 
@@ -246,6 +251,7 @@ const SHARED_STYLES = `
   }
   .footer-links {
     display: flex;
+    flex-wrap: wrap;
     gap: 1.25rem;
     list-style: none;
     margin: 0;
@@ -253,15 +259,15 @@ const SHARED_STYLES = `
   }
 `;
 
-export function renderPrivacyPolicyHtml(baseOrigin: string = 'https://bilanx.expert'): string {
+export function renderPrivacyPolicyHtml(baseOrigin: string = AI_STUDIO_HOME_URL): string {
   const canonicalUrl = `${baseOrigin}/privacy`;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Privacy Policy — ${APP_BRAND_NAME}</title>
-  <meta name="description" content="Official Privacy Policy and Google OAuth 2.0 User Data Disclosure for ${APP_BRAND_NAME} (DK-SVS eIDAS 2.0 Node Sandbox).">
+  <title>Privacy Policy — ${APP_BRAND_NAME} (${APP_NODE_ID})</title>
+  <meta name="description" content="Official Privacy Policy and Google OAuth 2.0 User Data Disclosure for ${APP_BRAND_NAME} (${APP_NODE_ID} — DK-SVS eIDAS 2.0 Node Sandbox).">
   <link rel="canonical" href="${canonicalUrl}">
   <style>${SHARED_STYLES}</style>
 </head>
@@ -272,7 +278,7 @@ export function renderPrivacyPolicyHtml(baseOrigin: string = 'https://bilanx.exp
         <span class="brand-badge" aria-hidden="true">BX</span>
         <span>
           <span class="brand-title">${APP_BRAND_NAME}</span>
-          <span class="brand-subtitle">DK-SVS Sovereign eIDAS 2.0 Node Sandbox</span>
+          <span class="brand-subtitle">${APP_NODE_ID} · DK-SVS eIDAS 2.0 Node Sandbox</span>
         </span>
       </a>
       <nav aria-label="Primary legal navigation">
@@ -291,10 +297,10 @@ export function renderPrivacyPolicyHtml(baseOrigin: string = 'https://bilanx.exp
       <h1>Privacy Policy — ${APP_BRAND_NAME}</h1>
       <p>
         This Privacy Policy governs the collection, verification, storage, and protection of information by
-        <strong>${APP_BRAND_NAME}</strong> (also referred to as <strong>${APP_SHORT_NAME}</strong> or the
-        <strong>DK-SVS eIDAS 2.0 Node Sandbox</strong>). It explicitly details how we handle Google User Data
-        obtained via Google Identity Services (OAuth 2.0 / OpenID Connect) and how our Zero-Knowledge Proof (ZKP)
-        validation architecture protects end-user privacy.
+        <strong>${APP_BRAND_NAME}</strong> (also registered as <strong>${APP_NODE_ID}</strong>,
+        <strong>Credentials Hub</strong>, and <strong>${APP_SHORT_NAME}</strong>). It explicitly details how we handle
+        Google User Data obtained via Google Identity Services (OAuth 2.0 / OpenID Connect) and how our Zero-Knowledge
+        Proof (ZKP) validation architecture protects end-user privacy across our official endpoints.
       </p>
     </div>
 
@@ -310,16 +316,19 @@ export function renderPrivacyPolicyHtml(baseOrigin: string = 'https://bilanx.exp
       </p>
     </div>
 
-    <h2>1. Data Controller &amp; Contact Information</h2>
+    <h2>1. Data Controller, Application Identity &amp; Official Endpoints</h2>
     <p>
-      The data controller responsible for the operation of <strong>${APP_BRAND_NAME}</strong> is:
+      The data controller responsible for the operation of <strong>${APP_BRAND_NAME}</strong> (<strong>${APP_NODE_ID}</strong>) is:
     </p>
     <ul>
       <li><strong>Controller / Architect:</strong> Daniele Palagi (Project Bilanx Sovereign Validation Systems)</li>
       <li><strong>Jurisdiction:</strong> Lucca, Tuscany, Italy (European Union — GDPR Regulation (EU) 2016/679 &amp; Swiss Federal Act on Data Protection nFADP)</li>
       <li><strong>Privacy &amp; Compliance Contact:</strong> <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a></li>
-      <li><strong>Official Application Home Page:</strong> <a href="${baseOrigin}/">${baseOrigin}/</a></li>
-      <li><strong>Official Privacy Policy URL:</strong> <a href="${canonicalUrl}">${canonicalUrl}</a></li>
+      <li><strong>Primary Home Page (AI Studio App):</strong> <a href="${AI_STUDIO_HOME_URL}">${AI_STUDIO_HOME_URL}</a></li>
+      <li><strong>AI Studio Interactive Sandbox:</strong> <a href="${AI_STUDIO_SANDBOX_URL}">${AI_STUDIO_SANDBOX_URL}</a></li>
+      <li><strong>Cloud Run Node Endpoint:</strong> <a href="${CLOUD_RUN_SERVICE_URL}">${CLOUD_RUN_SERVICE_URL}</a></li>
+      <li><strong>Official Privacy Policy URLs:</strong> <a href="${AI_STUDIO_HOME_URL}/privacy">${AI_STUDIO_HOME_URL}/privacy</a> &amp; <a href="${CLOUD_RUN_SERVICE_URL}/privacy">${CLOUD_RUN_SERVICE_URL}/privacy</a></li>
+      <li><strong>Source Repository:</strong> <a href="${GITHUB_REPO_URL}" target="_blank" rel="noopener noreferrer">${GITHUB_REPO_URL}</a></li>
     </ul>
 
     <h2>2. Information We Collect and Access</h2>
@@ -393,7 +402,7 @@ export function renderPrivacyPolicyHtml(baseOrigin: string = 'https://bilanx.exp
       <li><strong>No Sale of Personal Data:</strong> We never sell, rent, lease, or trade Google user data or personal information to any third party.</li>
       <li><strong>No Advertising or Profiling:</strong> We never use Google user data for targeted advertising, retargeting, data brokering, or creditworthiness evaluation.</li>
       <li><strong>No AI/ML Foundation Model Training:</strong> Google user data obtained via OAuth 2.0 is never used to train, fine-tune, or improve generalized artificial intelligence or machine learning models.</li>
-      <li><strong>Infrastructure Sub-processors:</strong> The application is hosted on secure cloud infrastructure (Google Cloud Run / Google Cloud Firestore in European regions and/or Fly.io Frankfurt <code>fra</code> region) acting solely as infrastructure processors under strict data protection terms.</li>
+      <li><strong>Infrastructure Sub-processors:</strong> The application is hosted on secure cloud infrastructure (Google Cloud Run / Google AI Studio / Google Cloud Firestore in European regions and/or Fly.io Frankfurt <code>fra</code> region) acting solely as infrastructure processors under strict data protection terms.</li>
     </ul>
 
     <h2>5. Data Storage, Security &amp; Retention</h2>
@@ -423,7 +432,7 @@ export function renderPrivacyPolicyHtml(baseOrigin: string = 'https://bilanx.exp
   <footer>
     <div class="footer-inner">
       <div>
-        <strong>${APP_BRAND_NAME}</strong> · Sovereign eIDAS 2.0 &amp; Dual-Key Validation System (DK-SVS)
+        <strong>${APP_BRAND_NAME}</strong> (${APP_NODE_ID}) · Sovereign eIDAS 2.0 &amp; Dual-Key Validation System (DK-SVS)
       </div>
       <ul class="footer-links">
         <li><a href="/">Home</a></li>
@@ -437,15 +446,15 @@ export function renderPrivacyPolicyHtml(baseOrigin: string = 'https://bilanx.exp
 </html>`;
 }
 
-export function renderTermsOfServiceHtml(baseOrigin: string = 'https://bilanx.expert'): string {
+export function renderTermsOfServiceHtml(baseOrigin: string = AI_STUDIO_HOME_URL): string {
   const canonicalUrl = `${baseOrigin}/terms`;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Terms of Service — ${APP_BRAND_NAME}</title>
-  <meta name="description" content="Terms of Service and Sandbox Evaluation Agreement for ${APP_BRAND_NAME} (DK-SVS eIDAS 2.0 Node Sandbox).">
+  <title>Terms of Service — ${APP_BRAND_NAME} (${APP_NODE_ID})</title>
+  <meta name="description" content="Terms of Service and Sandbox Evaluation Agreement for ${APP_BRAND_NAME} (${APP_NODE_ID} — DK-SVS eIDAS 2.0 Node Sandbox).">
   <link rel="canonical" href="${canonicalUrl}">
   <style>${SHARED_STYLES}</style>
 </head>
@@ -456,7 +465,7 @@ export function renderTermsOfServiceHtml(baseOrigin: string = 'https://bilanx.ex
         <span class="brand-badge" aria-hidden="true">BX</span>
         <span>
           <span class="brand-title">${APP_BRAND_NAME}</span>
-          <span class="brand-subtitle">DK-SVS Sovereign eIDAS 2.0 Node Sandbox</span>
+          <span class="brand-subtitle">${APP_NODE_ID} · DK-SVS eIDAS 2.0 Node Sandbox</span>
         </span>
       </a>
       <nav aria-label="Primary legal navigation">
@@ -475,8 +484,8 @@ export function renderTermsOfServiceHtml(baseOrigin: string = 'https://bilanx.ex
       <h1>Terms of Service — ${APP_BRAND_NAME}</h1>
       <p>
         These Terms of Service ("Terms") govern your access to and use of <strong>${APP_BRAND_NAME}</strong>
-        (the "Service"), a TRL 4 cryptographic evaluation sandbox for the Dual-Key Sovereign Validation System (DK-SVS)
-        and eIDAS 2.0 / FIDO2 age-verification protocols operated by Daniele Palagi ("Project Bilanx").
+        (<strong>${APP_NODE_ID}</strong>, the "Service"), a TRL 4 cryptographic evaluation sandbox for the Dual-Key
+        Sovereign Validation System (DK-SVS) and eIDAS 2.0 / FIDO2 age-verification protocols operated by Daniele Palagi ("Project Bilanx").
       </p>
     </div>
 
@@ -487,7 +496,7 @@ export function renderTermsOfServiceHtml(baseOrigin: string = 'https://bilanx.ex
       WebAuthn / FIDO2 hardware-bound assertions, and SAML 2.0 eIDAS node interoperability fixtures.
     </p>
     <ul>
-      <li>The Service is provided as a <strong>TRL 4 laboratory and pilot evaluation environment</strong>.</li>
+      <li>The Service is provided as a <strong>TRL 4 laboratory and pilot evaluation environment</strong> across <a href="${AI_STUDIO_HOME_URL}">${AI_STUDIO_HOME_URL}</a> and <a href="${CLOUD_RUN_SERVICE_URL}">${CLOUD_RUN_SERVICE_URL}</a>.</li>
       <li>Synthetic citizen profiles (e.g., Swiss Sovereign Sandbox and Italian CIE pilot fixtures) are strictly for technical evaluation and compliance testing.</li>
     </ul>
 
@@ -525,7 +534,7 @@ export function renderTermsOfServiceHtml(baseOrigin: string = 'https://bilanx.ex
   <footer>
     <div class="footer-inner">
       <div>
-        <strong>${APP_BRAND_NAME}</strong> · Sovereign eIDAS 2.0 &amp; Dual-Key Validation System (DK-SVS)
+        <strong>${APP_BRAND_NAME}</strong> (${APP_NODE_ID}) · Sovereign eIDAS 2.0 &amp; Dual-Key Validation System (DK-SVS)
       </div>
       <ul class="footer-links">
         <li><a href="/">Home</a></li>

@@ -55,6 +55,8 @@ export function pilotDemoEnabled(): boolean {
 
 export const TRUSTED_ORIGINS = new Set([
   process.env.APP_ORIGIN,
+  'https://bilanx.ai.studio',
+  'https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app',
   'http://localhost:3000',
   'http://localhost:5173',
   'http://127.0.0.1:3000',
