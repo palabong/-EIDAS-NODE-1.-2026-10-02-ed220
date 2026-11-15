@@ -107,14 +107,13 @@ export function samlPresetsAllowed(options?: CreateAppOptions): boolean {
 export function createApp(options?: CreateAppOptions): express.Express {
   const app = express();
 
-  // 1. Security Headers (CSP, X-Content-Type-Options, X-Frame-Options, X-XSS-Protection)
+  // 1. Security Headers (CSP, X-Content-Type-Options, X-XSS-Protection, AI Studio frame-ancestors)
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader('X-XSS-Protection', '0');
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; connect-src 'self' ws: wss: https://accounts.google.com; frame-src 'self' https://accounts.google.com; object-src 'none'; base-uri 'self';"
+      "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https: blob:; connect-src 'self' ws: wss: https://accounts.google.com; frame-src 'self' https://accounts.google.com; frame-ancestors *; object-src 'none'; base-uri 'self';"
     );
     next();
   });

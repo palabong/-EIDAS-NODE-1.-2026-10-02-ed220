@@ -46,17 +46,29 @@ export function GoogleAuthGate({
     let pollTimer: ReturnType<typeof setInterval> | null = null;
 
     const setupClient = async () => {
-      let clientId: string | null = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || null;
+      const DEFAULT_CLIENT_ID = '622147315855-d7dhtqmp7ebo48bv706pjtsm1n90db57.apps.googleusercontent.com';
+      const normalizeClientId = (val?: string | null) => {
+        const trimmed = (val || '').trim();
+        if (!trimmed || trimmed === 'your_client_id.apps.googleusercontent.com' || trimmed === 'your_google_client_id_here' || trimmed === 'MY_GOOGLE_CLIENT_ID') {
+          return null;
+        }
+        return trimmed;
+      };
+
+      let clientId: string | null = normalizeClientId((import.meta as any).env?.VITE_GOOGLE_CLIENT_ID);
       if (!clientId) {
         try {
           const cfgRes = await fetch('/api/auth/config', { headers: { Accept: 'application/json' } });
           if (cfgRes.ok) {
             const cfg = await cfgRes.json();
-            clientId = cfg?.googleClientId || null;
+            clientId = normalizeClientId(cfg?.googleClientId);
           }
         } catch {
           // Ignore network error in offline sandbox mode
         }
+      }
+      if (!clientId) {
+        clientId = DEFAULT_CLIENT_ID;
       }
       if (!clientId || cancelled) {
         return;
@@ -280,6 +292,13 @@ export function GoogleAuthGate({
             </nav>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500 border-t border-slate-900 pt-1.5">
+            <a
+              href="https://bilanx-node.ai.studio/privacy"
+              onClick={handleLegalClick('privacy')}
+              className="hover:text-blue-400 underline"
+            >
+              bilanx-node.ai.studio/privacy
+            </a>
             <a
               href="https://bilanx.ai.studio/privacy"
               onClick={handleLegalClick('privacy')}

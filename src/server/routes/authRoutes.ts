@@ -4,7 +4,7 @@
  */
 
 import express from 'express';
-import { getClientIp, getErrorMessage, googleOAuthClient } from '../httpShared.ts';
+import { getClientIp, getErrorMessage, googleOAuthClient, resolveGoogleClientId } from '../httpShared.ts';
 import {
   recordAccessLog,
   getAccessLogs,
@@ -76,8 +76,8 @@ export function mountAuthRoutes(app: express.Express): void {
 
   // Expose public OAuth client configuration dynamically from runtime environment / Secret Manager
   app.get("/api/auth/config", (_req, res) => {
-    const googleClientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || null;
-    res.json({ googleClientId });
+    const googleClientId = resolveGoogleClientId(process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID);
+    res.json({ oauthConfigured: Boolean(googleClientId), googleClientId });
   });
 
   // Verify Google Identity Services ID Token / Credential (REM-02 Hardened)
@@ -103,7 +103,7 @@ export function mountAuthRoutes(app: express.Express): void {
         return;
       }
 
-      const expectedClientId = process.env.GOOGLE_CLIENT_ID;
+      const expectedClientId = resolveGoogleClientId(process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID);
       if (!expectedClientId) {
         console.error("[GoogleAuth] Configuration Error: GOOGLE_CLIENT_ID is not configured.");
         await recordAccessLog({

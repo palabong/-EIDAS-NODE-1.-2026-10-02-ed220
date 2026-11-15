@@ -46,7 +46,26 @@ declare global {
 }
 
 // Google OAuth2 Client
-export const googleOAuthClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+export const DEFAULT_PUBLIC_GOOGLE_CLIENT_ID =
+  '622147315855-d7dhtqmp7ebo48bv706pjtsm1n90db57.apps.googleusercontent.com';
+
+const PLACEHOLDER_CLIENT_IDS = new Set([
+  'your_client_id.apps.googleusercontent.com',
+  'your_google_client_id_here',
+  'MY_GOOGLE_CLIENT_ID',
+]);
+
+export function resolveGoogleClientId(raw?: string | null): string {
+  const trimmed = (raw || '').trim();
+  if (!trimmed || PLACEHOLDER_CLIENT_IDS.has(trimmed)) {
+    return DEFAULT_PUBLIC_GOOGLE_CLIENT_ID;
+  }
+  return trimmed;
+}
+
+export const googleOAuthClient = new OAuth2Client(
+  resolveGoogleClientId(process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID)
+);
 
 /** Hosted pilot sandbox. Production stays closed unless this is set explicitly. */
 export function pilotDemoEnabled(): boolean {
@@ -55,6 +74,8 @@ export function pilotDemoEnabled(): boolean {
 
 export const TRUSTED_ORIGINS = new Set([
   process.env.APP_ORIGIN,
+  'https://bilanx-node.ai.studio',
+  'https://ais-dev-tcotnprdclohwgzqvuaakc-381763343373.europe-west1.run.app',
   'https://bilanx.ai.studio',
   'https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app',
   'http://localhost:3000',

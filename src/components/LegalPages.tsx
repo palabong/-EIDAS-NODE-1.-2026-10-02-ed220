@@ -5,6 +5,8 @@ export const APP_BRAND_NAME = 'Project Bilanx — Credentials Hub';
 export const APP_NODE_ID = 'PROJECT BILANX / EIDAS-NODE 1.';
 export const EFFECTIVE_DATE = 'November 15, 2026';
 export const CONTACT_EMAIL = 'daniele.palagi92@gmail.com';
+export const AI_STUDIO_NODE_URL = 'https://bilanx-node.ai.studio';
+export const AI_STUDIO_DEV_SANDBOX_URL = 'https://ais-dev-tcotnprdclohwgzqvuaakc-381763343373.europe-west1.run.app';
 export const AI_STUDIO_HOME_URL = 'https://bilanx.ai.studio';
 export const AI_STUDIO_SANDBOX_URL = 'https://ai.studio/apps/52affc3b-2293-4cf0-bd6c-6b6cdc3a926a';
 export const CLOUD_RUN_SERVICE_URL = 'https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app';
@@ -220,6 +222,18 @@ function PrivacyPolicyArticle({
             <strong className="text-white">Privacy &amp; Compliance Contact:</strong>{' '}
             <a href={`mailto:${CONTACT_EMAIL}`} className="text-blue-400 underline">
               {CONTACT_EMAIL}
+            </a>
+          </li>
+          <li>
+            <strong className="text-white">Published AI Studio Node (Primary):</strong>{' '}
+            <a href={AI_STUDIO_NODE_URL} className="text-blue-400 underline">
+              {AI_STUDIO_NODE_URL}
+            </a>
+          </li>
+          <li>
+            <strong className="text-white">AI Studio Dev Sandbox (Cloud Run):</strong>{' '}
+            <a href={AI_STUDIO_DEV_SANDBOX_URL} className="text-blue-400 underline">
+              {AI_STUDIO_DEV_SANDBOX_URL}
             </a>
           </li>
           <li>

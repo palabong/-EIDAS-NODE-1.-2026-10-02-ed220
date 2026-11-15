@@ -10,6 +10,8 @@ export const APP_NODE_ID = 'PROJECT BILANX / EIDAS-NODE 1.';
 export const APP_SHORT_NAME = 'Project Bilanx';
 export const EFFECTIVE_DATE = 'November 15, 2026';
 export const CONTACT_EMAIL = 'daniele.palagi92@gmail.com';
+export const AI_STUDIO_NODE_URL = 'https://bilanx-node.ai.studio';
+export const AI_STUDIO_DEV_SANDBOX_URL = 'https://ais-dev-tcotnprdclohwgzqvuaakc-381763343373.europe-west1.run.app';
 export const AI_STUDIO_HOME_URL = 'https://bilanx.ai.studio';
 export const AI_STUDIO_SANDBOX_URL = 'https://ai.studio/apps/52affc3b-2293-4cf0-bd6c-6b6cdc3a926a';
 export const CLOUD_RUN_SERVICE_URL = 'https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app';
@@ -20,7 +22,7 @@ function resolveBaseOrigin(req: express.Request): string {
     return process.env.APP_ORIGIN.replace(/\/+$/, '');
   }
   const proto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() || req.protocol || 'https';
-  const host = req.get('host') || 'bilanx.ai.studio';
+  const host = req.get('host') || 'bilanx-node.ai.studio';
   return `${proto}://${host}`;
 }
 
@@ -259,7 +261,7 @@ const SHARED_STYLES = `
   }
 `;
 
-export function renderPrivacyPolicyHtml(baseOrigin: string = AI_STUDIO_HOME_URL): string {
+export function renderPrivacyPolicyHtml(baseOrigin: string = AI_STUDIO_NODE_URL): string {
   const canonicalUrl = `${baseOrigin}/privacy`;
   return `<!DOCTYPE html>
 <html lang="en">
@@ -324,10 +326,11 @@ export function renderPrivacyPolicyHtml(baseOrigin: string = AI_STUDIO_HOME_URL)
       <li><strong>Controller / Architect:</strong> Daniele Palagi (Project Bilanx Sovereign Validation Systems)</li>
       <li><strong>Jurisdiction:</strong> Lucca, Tuscany, Italy (European Union — GDPR Regulation (EU) 2016/679 &amp; Swiss Federal Act on Data Protection nFADP)</li>
       <li><strong>Privacy &amp; Compliance Contact:</strong> <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a></li>
-      <li><strong>Primary Home Page (AI Studio App):</strong> <a href="${AI_STUDIO_HOME_URL}">${AI_STUDIO_HOME_URL}</a></li>
-      <li><strong>AI Studio Interactive Sandbox:</strong> <a href="${AI_STUDIO_SANDBOX_URL}">${AI_STUDIO_SANDBOX_URL}</a></li>
-      <li><strong>Cloud Run Node Endpoint:</strong> <a href="${CLOUD_RUN_SERVICE_URL}">${CLOUD_RUN_SERVICE_URL}</a></li>
-      <li><strong>Official Privacy Policy URLs:</strong> <a href="${AI_STUDIO_HOME_URL}/privacy">${AI_STUDIO_HOME_URL}/privacy</a> &amp; <a href="${CLOUD_RUN_SERVICE_URL}/privacy">${CLOUD_RUN_SERVICE_URL}/privacy</a></li>
+      <li><strong>Published AI Studio Node (Primary):</strong> <a href="${AI_STUDIO_NODE_URL}/">${AI_STUDIO_NODE_URL}/</a> (Privacy: <a href="${AI_STUDIO_NODE_URL}/privacy">${AI_STUDIO_NODE_URL}/privacy</a>)</li>
+      <li><strong>AI Studio Dev Sandbox (Cloud Run):</strong> <a href="${AI_STUDIO_DEV_SANDBOX_URL}/">${AI_STUDIO_DEV_SANDBOX_URL}/</a> (Privacy: <a href="${AI_STUDIO_DEV_SANDBOX_URL}/privacy">${AI_STUDIO_DEV_SANDBOX_URL}/privacy</a>)</li>
+      <li><strong>AI Studio App Alias:</strong> <a href="${AI_STUDIO_HOME_URL}/">${AI_STUDIO_HOME_URL}/</a> (Privacy: <a href="${AI_STUDIO_HOME_URL}/privacy">${AI_STUDIO_HOME_URL}/privacy</a>)</li>
+      <li><strong>AI Studio Interactive Workspace:</strong> <a href="${AI_STUDIO_SANDBOX_URL}">${AI_STUDIO_SANDBOX_URL}</a></li>
+      <li><strong>Cloud Run Node Endpoint:</strong> <a href="${CLOUD_RUN_SERVICE_URL}/">${CLOUD_RUN_SERVICE_URL}/</a> (Privacy: <a href="${CLOUD_RUN_SERVICE_URL}/privacy">${CLOUD_RUN_SERVICE_URL}/privacy</a>)</li>
       <li><strong>Source Repository:</strong> <a href="${GITHUB_REPO_URL}" target="_blank" rel="noopener noreferrer">${GITHUB_REPO_URL}</a></li>
     </ul>
 
@@ -446,7 +449,7 @@ export function renderPrivacyPolicyHtml(baseOrigin: string = AI_STUDIO_HOME_URL)
 </html>`;
 }
 
-export function renderTermsOfServiceHtml(baseOrigin: string = AI_STUDIO_HOME_URL): string {
+export function renderTermsOfServiceHtml(baseOrigin: string = AI_STUDIO_NODE_URL): string {
   const canonicalUrl = `${baseOrigin}/terms`;
   return `<!DOCTYPE html>
 <html lang="en">
