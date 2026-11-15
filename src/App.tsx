@@ -31,6 +31,18 @@ import { BilanxStressTest } from './sandbox/BilanxStressTest';
 import { useGoogleAuth, VerifiedGoogleUser } from './hooks/useGoogleAuth';
 import { GoogleAuthGate } from './components/GoogleAuthGate';
 import { AccessLogAuditModal } from './components/AccessLogAuditModal';
+import { LegalPage } from './components/LegalPages';
+
+function detectLegalRoute(pathname: string): 'privacy' | 'terms' | null {
+  const clean = pathname.toLowerCase().replace(/\/+$/, '');
+  if (clean === '/privacy' || clean === '/privacy.html' || clean === '/privacy-policy') {
+    return 'privacy';
+  }
+  if (clean === '/terms' || clean === '/terms.html' || clean === '/terms-of-service') {
+    return 'terms';
+  }
+  return null;
+}
 
 export default function App() {
   const { 
@@ -45,6 +57,27 @@ export default function App() {
   } = useGoogleAuth();
 
   const [showAuditModal, setShowAuditModal] = useState(false);
+  const [legalRoute, setLegalRoute] = useState<'privacy' | 'terms' | null>(() =>
+    typeof window !== 'undefined' ? detectLegalRoute(window.location.pathname) : null
+  );
+
+  useEffect(() => {
+    const onPopState = () => {
+      setLegalRoute(detectLegalRoute(window.location.pathname));
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  if (legalRoute) {
+    return (
+      <LegalPage
+        page={legalRoute}
+        onNavigateHome={() => setLegalRoute(null)}
+        onSwitchLegalPage={(page) => setLegalRoute(page)}
+      />
+    );
+  }
 
   if (loading) {
     return (
@@ -235,7 +268,7 @@ function BilanxApp({
       <header className="flex flex-col md:flex-row justify-between items-center px-6 md:px-10 py-5 border-b border-slate-200 bg-white gap-4 z-40 sticky top-0 shadow-xs">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-[#0B3B60] border border-blue-900 rounded flex items-center justify-center shadow-xs">
-            <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
             </svg>
           </div>
@@ -243,7 +276,7 @@ function BilanxApp({
             <span className="text-lg md:text-xl font-black tracking-tight text-[#0B3B60] uppercase leading-none">
               BILANX.<span className="text-blue-500">EXPERT</span>
             </span>
-            <span className="text-[9px] font-bold tracking-widest text-slate-500 uppercase mt-1">DK-SVS Lab Sandbox</span>
+            <span className="text-[9px] font-bold tracking-widest text-slate-500 uppercase mt-1">Project Bilanx — Credentials Hub · DK-SVS Lab Sandbox</span>
           </div>
         </div>
 
@@ -427,8 +460,18 @@ function BilanxApp({
         </div>
         
         <div className="flex flex-col sm:flex-row items-center gap-4 text-center sm:text-right">
+          <nav aria-label="Institutional legal links" className="flex items-center gap-3 text-[11px] font-mono font-bold">
+            <a href="/privacy" className="text-[#0B3B60] hover:underline">
+              Privacy Policy
+            </a>
+            <span className="text-slate-300" aria-hidden="true">|</span>
+            <a href="/terms" className="text-[#0B3B60] hover:underline">
+              Terms of Service
+            </a>
+          </nav>
+          <div className="h-4 w-[1px] bg-slate-300 hidden sm:block"></div>
           <span className="text-[10px] text-slate-500 italic font-mono">
-            Directive Framework: COM(2026) 438 / Customs Compliance Hub
+            Directive Framework: COM(2026) 438 / Project Bilanx — Credentials Hub
           </span>
           <div className="h-4 w-[1px] bg-slate-300 hidden sm:block"></div>
           <span className="text-xs font-bold text-[#0B3B60] tracking-wider flex items-center gap-1.5 justify-center sm:justify-end uppercase font-mono">

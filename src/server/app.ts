@@ -43,6 +43,7 @@ import { mountSamlRoutes } from './routes/samlRoutes.ts';
 import { mountClearanceRoutes } from './routes/clearanceRoutes.ts';
 import { mountStockRoutes } from './routes/stockRoutes.ts';
 import { mountWebAuthnRoutes } from './routes/webauthnRoutes.ts';
+import { mountLegalRoutes } from './routes/legalRoutes.ts';
 
 export function validateStartupEnvironment(): void {
   const isProd = process.env.NODE_ENV === 'production';
@@ -148,6 +149,7 @@ export function createApp(options?: CreateAppOptions): express.Express {
     res.json({ clearance: clearanceMetricsSnapshot() });
   });
 
+  mountLegalRoutes(app);
   mountAuthRoutes(app);
   mountSamlRoutes(app, { allowSamlPresets: samlPresetsAllowed(options) });
   mountClearanceRoutes(app, getInstitutionalKeyPair);
