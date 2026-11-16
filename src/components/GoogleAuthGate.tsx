@@ -27,6 +27,8 @@ export function GoogleAuthGate({
 }: GoogleAuthGateProps) {
   const [gsiLoaded, setGsiLoaded] = useState(false);
   const buttonContainerRef = useRef<HTMLDivElement>(null);
+  const appOrigin = typeof window !== 'undefined' ? window.location.origin.replace(/\/+$/, '') : '';
+  const flyOrigin = 'https://eidas-node-1-2026-10-02-ed220-black-water-1048.fly.dev';
 
   const handleLegalClick = (page: 'privacy' | 'terms') => (e: React.MouseEvent<HTMLAnchorElement>) => {
     if (onOpenLegalPage) {
@@ -292,23 +294,46 @@ export function GoogleAuthGate({
             </nav>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500 border-t border-slate-900 pt-1.5">
+            {appOrigin && (
+              <a
+                href={`${appOrigin}/privacy`}
+                onClick={handleLegalClick('privacy')}
+                className="hover:text-blue-400 underline"
+              >
+                {appOrigin.replace(/^https?:\/\//, '')}/privacy
+              </a>
+            )}
+            {appOrigin && (
+              <a
+                href={`${appOrigin}/terms`}
+                onClick={handleLegalClick('terms')}
+                className="hover:text-blue-400 underline"
+              >
+                {appOrigin.replace(/^https?:\/\//, '')}/terms
+              </a>
+            )}
+            {appOrigin !== flyOrigin && (
+              <a
+                href={`${flyOrigin}/privacy`}
+                className="hover:text-blue-400 underline"
+              >
+                Fly.io Privacy Policy
+              </a>
+            )}
             <a
               href="https://bilanx-node.ai.studio/privacy"
-              onClick={handleLegalClick('privacy')}
               className="hover:text-blue-400 underline"
             >
               bilanx-node.ai.studio/privacy
             </a>
             <a
               href="https://bilanx.ai.studio/privacy"
-              onClick={handleLegalClick('privacy')}
               className="hover:text-blue-400 underline"
             >
               bilanx.ai.studio/privacy
             </a>
             <a
               href="https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app/privacy"
-              onClick={handleLegalClick('privacy')}
               className="hover:text-blue-400 underline"
             >
               Cloud Run Privacy Policy

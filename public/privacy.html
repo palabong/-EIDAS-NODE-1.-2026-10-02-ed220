@@ -5,7 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Privacy Policy — Project Bilanx — Credentials Hub (PROJECT BILANX / EIDAS-NODE 1.)</title>
   <meta name="description" content="Official Privacy Policy and Google OAuth 2.0 User Data Disclosure for Project Bilanx — Credentials Hub (PROJECT BILANX / EIDAS-NODE 1. — DK-SVS eIDAS 2.0 Node Sandbox).">
-  <link rel="canonical" href="https://bilanx-node.ai.studio/privacy">
+  <link rel="canonical" href="/privacy" id="legal-canonical">
+  <script>
+    (function () {
+      var link = document.getElementById('legal-canonical');
+      if (link && location.origin) link.href = location.origin + '/privacy';
+      var selfLink = document.getElementById('privacy-self-link');
+      if (selfLink && location.origin) {
+        selfLink.href = location.origin + '/privacy';
+        selfLink.textContent = location.origin + '/privacy';
+      }
+    })();
+  </script>
   <style>
   :root {
     --bg-page: #020617;
@@ -299,6 +310,7 @@
       <li><strong>AI Studio App Alias:</strong> <a href="https://bilanx.ai.studio/">https://bilanx.ai.studio/</a> (Privacy: <a href="https://bilanx.ai.studio/privacy">https://bilanx.ai.studio/privacy</a>)</li>
       <li><strong>AI Studio Interactive Workspace:</strong> <a href="https://ai.studio/apps/52affc3b-2293-4cf0-bd6c-6b6cdc3a926a">https://ai.studio/apps/52affc3b-2293-4cf0-bd6c-6b6cdc3a926a</a></li>
       <li><strong>Cloud Run Node Endpoint:</strong> <a href="https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app/">https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app/</a> (Privacy: <a href="https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app/privacy">https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app/privacy</a>)</li>
+      <li><strong>Fly.io Node (Frankfurt fra):</strong> <a href="https://eidas-node-1-2026-10-02-ed220-black-water-1048.fly.dev/">https://eidas-node-1-2026-10-02-ed220-black-water-1048.fly.dev/</a> (Privacy: <a href="https://eidas-node-1-2026-10-02-ed220-black-water-1048.fly.dev/privacy">https://eidas-node-1-2026-10-02-ed220-black-water-1048.fly.dev/privacy</a>, Terms: <a href="https://eidas-node-1-2026-10-02-ed220-black-water-1048.fly.dev/terms">https://eidas-node-1-2026-10-02-ed220-black-water-1048.fly.dev/terms</a>)</li>
       <li><strong>Source Repository:</strong> <a href="https://github.com/palabong/-EIDAS-NODE-1.-2026-10-02-ed220" target="_blank" rel="noopener noreferrer">https://github.com/palabong/-EIDAS-NODE-1.-2026-10-02-ed220</a></li>
     </ul>
 
@@ -396,7 +408,7 @@
 
     <h2>7. Changes to This Privacy Policy</h2>
     <p>
-      We may update this Privacy Policy periodically to reflect technical, cryptographic, or regulatory updates. Any changes will be posted on this page (<a href="https://bilanx-node.ai.studio/privacy">https://bilanx-node.ai.studio/privacy</a>) with an updated effective date.
+      We may update this Privacy Policy periodically to reflect technical, cryptographic, or regulatory updates. Any changes will be posted on this page (<a href="/privacy" id="privacy-self-link">/privacy</a>) with an updated effective date.
     </p>
   </main>
 

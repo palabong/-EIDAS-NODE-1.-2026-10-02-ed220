@@ -13,6 +13,7 @@ import {
   validateStartupEnvironment, 
   getErrorMessage 
 } from './src/server/app.ts';
+import { trySendLegalPage } from './src/server/routes/legalRoutes.ts';
 
 export { createApp, validateStartupEnvironment };
 
@@ -41,8 +42,20 @@ export async function startServer(port: number = parseInt(process.env.PORT || '3
   } else {
     console.log("[Production Controller] Serving static assets from dist/ directory...");
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    // index:false keeps dist/privacy/index.html from answering GET /privacy.
+    // Those URLs are the host-aware documents from mountLegalRoutes.
+    const staticAssets = express.static(distPath, { index: false });
+    app.use((req, res, next) => {
+      if (req.method === 'GET' || req.method === 'HEAD') {
+        const kind = (req.path || '').toLowerCase();
+        if (kind.startsWith('/privacy') || kind.startsWith('/terms')) {
+          if (trySendLegalPage(req, res)) return;
+        }
+      }
+      staticAssets(req, res, next);
+    });
     app.get('*', (req, res) => {
+      if (trySendLegalPage(req, res)) return;
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

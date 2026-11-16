@@ -10,6 +10,7 @@ export const AI_STUDIO_DEV_SANDBOX_URL = 'https://ais-dev-tcotnprdclohwgzqvuaakc
 export const AI_STUDIO_HOME_URL = 'https://bilanx.ai.studio';
 export const AI_STUDIO_SANDBOX_URL = 'https://ai.studio/apps/52affc3b-2293-4cf0-bd6c-6b6cdc3a926a';
 export const CLOUD_RUN_SERVICE_URL = 'https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app';
+export const FLY_APP_URL = 'https://eidas-node-1-2026-10-02-ed220-black-water-1048.fly.dev';
 export const GITHUB_REPO_URL = 'https://github.com/palabong/-EIDAS-NODE-1.-2026-10-02-ed220';
 
 interface LegalPageProps {
@@ -255,6 +256,24 @@ function PrivacyPolicyArticle({
             </a>
           </li>
           <li>
+            <strong className="text-white">Fly.io Node (Frankfurt):</strong>{' '}
+            <a href={`${FLY_APP_URL}/privacy`} className="text-blue-400 underline">
+              {FLY_APP_URL}/privacy
+            </a>
+            {' · '}
+            <a href={`${FLY_APP_URL}/terms`} className="text-blue-400 underline">
+              Terms
+            </a>
+          </li>
+          {typeof window !== 'undefined' && window.location.origin.replace(/\/+$/, '') !== FLY_APP_URL && (
+            <li>
+              <strong className="text-white">This deployment:</strong>{' '}
+              <a href="/privacy" onClick={onSwitchLegalPage('privacy')} className="text-blue-400 underline">
+                {window.location.origin}/privacy
+              </a>
+            </li>
+          )}
+          <li>
             <strong className="text-white">Source Repository:</strong>{' '}
             <a href={GITHUB_REPO_URL} target="_blank" rel="noopener noreferrer" className="text-blue-400 underline">
               {GITHUB_REPO_URL}
@@ -388,6 +407,8 @@ function TermsOfServiceArticle({
           <strong className="text-white">{APP_BRAND_NAME}</strong> provides an interactive technical demonstration and
           cryptographic verification laboratory implementing ECDSA P-256 institutional binding, Pedersen commitments,
           8-bit NIZKP range proofs (Scheme B2), WebAuthn / FIDO2 hardware-bound assertions, and SAML 2.0 eIDAS node interoperability fixtures.
+          The Service is hosted at{' '}
+          <a href={FLY_APP_URL} className="text-blue-400 underline">{FLY_APP_URL}</a>.
         </p>
       </section>
 

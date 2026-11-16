@@ -15,6 +15,7 @@ export const AI_STUDIO_DEV_SANDBOX_URL = 'https://ais-dev-tcotnprdclohwgzqvuaakc
 export const AI_STUDIO_HOME_URL = 'https://bilanx.ai.studio';
 export const AI_STUDIO_SANDBOX_URL = 'https://ai.studio/apps/52affc3b-2293-4cf0-bd6c-6b6cdc3a926a';
 export const CLOUD_RUN_SERVICE_URL = 'https://project-bilanx-eidas-node-1-622147315855.europe-west2.run.app';
+export const FLY_APP_URL = 'https://eidas-node-1-2026-10-02-ed220-black-water-1048.fly.dev';
 export const GITHUB_REPO_URL = 'https://github.com/palabong/-EIDAS-NODE-1.-2026-10-02-ed220';
 
 function resolveBaseOrigin(req: express.Request): string {
@@ -22,8 +23,31 @@ function resolveBaseOrigin(req: express.Request): string {
     return process.env.APP_ORIGIN.replace(/\/+$/, '');
   }
   const proto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() || req.protocol || 'https';
-  const host = req.get('host') || 'bilanx-node.ai.studio';
+  const host = req.get('host') || new URL(FLY_APP_URL).host;
   return `${proto}://${host}`;
+}
+
+/** Same-origin legal paths, including the static copies under public/. */
+export function legalDocumentKind(pathname: string): 'privacy' | 'terms' | null {
+  const clean = (pathname || '')
+    .toLowerCase()
+    .replace(/\/+$/, '')
+    .replace(/\/index\.html$/, '');
+  if (clean === '/privacy' || clean === '/privacy.html' || clean === '/privacy-policy') return 'privacy';
+  if (clean === '/terms' || clean === '/terms.html' || clean === '/terms-of-service') return 'terms';
+  return null;
+}
+
+function uniqueOrigins(origins: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const origin of origins) {
+    const base = (origin || '').replace(/\/+$/, '');
+    if (!base || seen.has(base)) continue;
+    seen.add(base);
+    out.push(base);
+  }
+  return out;
 }
 
 const SHARED_STYLES = `
@@ -261,8 +285,23 @@ const SHARED_STYLES = `
   }
 `;
 
-export function renderPrivacyPolicyHtml(baseOrigin: string = AI_STUDIO_NODE_URL): string {
+export function renderPrivacyPolicyHtml(baseOrigin: string = FLY_APP_URL): string {
   const canonicalUrl = `${baseOrigin}/privacy`;
+  const hostedOrigins = uniqueOrigins([baseOrigin, FLY_APP_URL, AI_STUDIO_NODE_URL, AI_STUDIO_HOME_URL, CLOUD_RUN_SERVICE_URL, AI_STUDIO_DEV_SANDBOX_URL]);
+  const hostedList = hostedOrigins.map((origin) => {
+    const label = origin === FLY_APP_URL
+      ? 'Fly.io Node (Frankfurt fra)'
+      : origin === baseOrigin
+        ? 'This deployment'
+        : origin === AI_STUDIO_NODE_URL
+          ? 'Published AI Studio Node'
+          : origin === AI_STUDIO_HOME_URL
+            ? 'AI Studio App Alias'
+            : origin === CLOUD_RUN_SERVICE_URL
+              ? 'Cloud Run Node Endpoint'
+              : 'AI Studio Dev Sandbox (Cloud Run)';
+    return `<li><strong>${label}:</strong> <a href="${origin}/">${origin}/</a> (Privacy: <a href="${origin}/privacy">${origin}/privacy</a>, Terms: <a href="${origin}/terms">${origin}/terms</a>)</li>`;
+  }).join('\n      ');
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -326,11 +365,8 @@ export function renderPrivacyPolicyHtml(baseOrigin: string = AI_STUDIO_NODE_URL)
       <li><strong>Controller / Architect:</strong> Daniele Palagi (Project Bilanx Sovereign Validation Systems)</li>
       <li><strong>Jurisdiction:</strong> Lucca, Tuscany, Italy (European Union — GDPR Regulation (EU) 2016/679 &amp; Swiss Federal Act on Data Protection nFADP)</li>
       <li><strong>Privacy &amp; Compliance Contact:</strong> <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a></li>
-      <li><strong>Published AI Studio Node (Primary):</strong> <a href="${AI_STUDIO_NODE_URL}/">${AI_STUDIO_NODE_URL}/</a> (Privacy: <a href="${AI_STUDIO_NODE_URL}/privacy">${AI_STUDIO_NODE_URL}/privacy</a>)</li>
-      <li><strong>AI Studio Dev Sandbox (Cloud Run):</strong> <a href="${AI_STUDIO_DEV_SANDBOX_URL}/">${AI_STUDIO_DEV_SANDBOX_URL}/</a> (Privacy: <a href="${AI_STUDIO_DEV_SANDBOX_URL}/privacy">${AI_STUDIO_DEV_SANDBOX_URL}/privacy</a>)</li>
-      <li><strong>AI Studio App Alias:</strong> <a href="${AI_STUDIO_HOME_URL}/">${AI_STUDIO_HOME_URL}/</a> (Privacy: <a href="${AI_STUDIO_HOME_URL}/privacy">${AI_STUDIO_HOME_URL}/privacy</a>)</li>
+      ${hostedList}
       <li><strong>AI Studio Interactive Workspace:</strong> <a href="${AI_STUDIO_SANDBOX_URL}">${AI_STUDIO_SANDBOX_URL}</a></li>
-      <li><strong>Cloud Run Node Endpoint:</strong> <a href="${CLOUD_RUN_SERVICE_URL}/">${CLOUD_RUN_SERVICE_URL}/</a> (Privacy: <a href="${CLOUD_RUN_SERVICE_URL}/privacy">${CLOUD_RUN_SERVICE_URL}/privacy</a>)</li>
       <li><strong>Source Repository:</strong> <a href="${GITHUB_REPO_URL}" target="_blank" rel="noopener noreferrer">${GITHUB_REPO_URL}</a></li>
     </ul>
 
@@ -449,8 +485,11 @@ export function renderPrivacyPolicyHtml(baseOrigin: string = AI_STUDIO_NODE_URL)
 </html>`;
 }
 
-export function renderTermsOfServiceHtml(baseOrigin: string = AI_STUDIO_NODE_URL): string {
+export function renderTermsOfServiceHtml(baseOrigin: string = FLY_APP_URL): string {
   const canonicalUrl = `${baseOrigin}/terms`;
+  const serviceHosts = uniqueOrigins([baseOrigin, FLY_APP_URL, AI_STUDIO_HOME_URL, CLOUD_RUN_SERVICE_URL])
+    .map((origin) => `<a href="${origin}">${origin}</a>`)
+    .join(', ');
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -499,7 +538,7 @@ export function renderTermsOfServiceHtml(baseOrigin: string = AI_STUDIO_NODE_URL
       WebAuthn / FIDO2 hardware-bound assertions, and SAML 2.0 eIDAS node interoperability fixtures.
     </p>
     <ul>
-      <li>The Service is provided as a <strong>TRL 4 laboratory and pilot evaluation environment</strong> across <a href="${AI_STUDIO_HOME_URL}">${AI_STUDIO_HOME_URL}</a> and <a href="${CLOUD_RUN_SERVICE_URL}">${CLOUD_RUN_SERVICE_URL}</a>.</li>
+      <li>The Service is provided as a <strong>TRL 4 laboratory and pilot evaluation environment</strong> at ${serviceHosts}.</li>
       <li>Synthetic citizen profiles (e.g., Swiss Sovereign Sandbox and Italian CIE pilot fixtures) are strictly for technical evaluation and compliance testing.</li>
     </ul>
 
@@ -551,18 +590,23 @@ export function renderTermsOfServiceHtml(baseOrigin: string = AI_STUDIO_NODE_URL
 </html>`;
 }
 
-export function mountLegalRoutes(app: express.Express): void {
-  app.get(['/privacy', '/privacy.html', '/privacy-policy'], (req, res) => {
-    const baseOrigin = resolveBaseOrigin(req);
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=300');
-    res.status(200).send(renderPrivacyPolicyHtml(baseOrigin));
-  });
+export function trySendLegalPage(req: express.Request, res: express.Response): boolean {
+  const kind = legalDocumentKind(req.path);
+  if (!kind) return false;
+  const baseOrigin = resolveBaseOrigin(req);
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=300');
+  res.status(200).send(kind === 'privacy' ? renderPrivacyPolicyHtml(baseOrigin) : renderTermsOfServiceHtml(baseOrigin));
+  return true;
+}
 
-  app.get(['/terms', '/terms.html', '/terms-of-service'], (req, res) => {
-    const baseOrigin = resolveBaseOrigin(req);
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=300');
-    res.status(200).send(renderTermsOfServiceHtml(baseOrigin));
+export function mountLegalRoutes(app: express.Express): void {
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      next();
+      return;
+    }
+    if (trySendLegalPage(req, res)) return;
+    next();
   });
 }

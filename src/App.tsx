@@ -35,7 +35,7 @@ import { LegalPage } from './components/LegalPages';
 
 function detectLegalRoute(loc?: Pick<Location, 'pathname' | 'search' | 'hash'>): 'privacy' | 'terms' | null {
   if (!loc) return null;
-  const clean = (loc.pathname || '').toLowerCase().replace(/\/+$/, '');
+  const clean = (loc.pathname || '').toLowerCase().replace(/\/+$/, '').replace(/\/index\.html$/, '');
   if (clean === '/privacy' || clean === '/privacy.html' || clean === '/privacy-policy') {
     return 'privacy';
   }
