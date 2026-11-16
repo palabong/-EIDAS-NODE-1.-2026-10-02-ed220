@@ -13,6 +13,7 @@ import {
   validateStartupEnvironment, 
   getErrorMessage 
 } from './src/server/app.ts';
+import { globalSessionStore } from './src/server/sessionManager.ts';
 import { trySendLegalPage } from './src/server/routes/legalRoutes.ts';
 
 export { createApp, validateStartupEnvironment };
@@ -23,6 +24,7 @@ export { createApp, validateStartupEnvironment };
  */
 export async function startServer(port: number = parseInt(process.env.PORT || '3000', 10)) {
   validateStartupEnvironment();
+  await globalSessionStore.hydrateFromFirestore();
   // isTest stays false. The local demo still needs fixture citizens.
   // NODE_ENV=production keeps preset minting closed unless ALLOW_PILOT_DEMO=true.
   const app = createApp({

@@ -1,7 +1,12 @@
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
-import { GoogleAuth } from 'google-auth-library';
+import {
+  firestoreClearCollection,
+  firestoreListDocuments,
+  firestoreUpsertDocument,
+  isFirestoreEnabled,
+} from './firestoreRest.ts';
 
 export interface AccessLog {
   id: string;
@@ -45,11 +50,57 @@ let isInitialized = false;
 let isWriting = false;
 let hasPendingWrite = false;
 
+async function loadLogsFromFirestore(): Promise<AccessLog[] | null> {
+  if (!isFirestoreEnabled()) return null;
+  try {
+    const docs = await firestoreListDocuments('access_logs', 1000);
+    const parsed: AccessLog[] = [];
+    for (const doc of docs) {
+      const f = doc.fields;
+      if (!f) continue;
+      let metadata: Record<string, any> | undefined;
+      if (f.metadata?.stringValue) {
+        try {
+          metadata = JSON.parse(f.metadata.stringValue);
+        } catch {}
+      }
+      parsed.push({
+        id: f.id?.stringValue || doc.name.split('/').pop() || crypto.randomUUID(),
+        timestamp: f.timestamp?.timestampValue || f.timestamp?.stringValue || new Date().toISOString(),
+        userId: f.userId?.stringValue || 'unknown',
+        email: f.email?.stringValue || 'unknown',
+        name: f.name?.stringValue || 'Unknown',
+        picture: f.picture?.stringValue || undefined,
+        authMethod: (f.authMethod?.stringValue as AccessLog['authMethod']) || 'google_jwt_verified',
+        action: (f.action?.stringValue as AccessLog['action']) || 'APP_ACCESS',
+        ipAddress: f.ipAddress?.stringValue || '0.0.0.0',
+        userAgent: f.userAgent?.stringValue || '',
+        status: (f.status?.stringValue as AccessLog['status']) || 'SUCCESS',
+        metadata,
+      });
+    }
+    parsed.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    return parsed;
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.warn(`[AccessLogDb] Cloud Firestore read skipped: ${errMsg}`);
+    return null;
+  }
+}
+
 async function ensureDbInitialized() {
   if (isInitialized) return;
   const dbFile = accessLogFile();
   try {
     await fs.mkdir(path.dirname(dbFile), { recursive: true });
+
+    const remoteLogs = await loadLogsFromFirestore();
+    if (remoteLogs && remoteLogs.length > 0) {
+      memoryLogs = remoteLogs.slice(0, 10000);
+      await persistLogs();
+      return;
+    }
+
     try {
       const fileData = await fs.readFile(dbFile, 'utf-8');
       memoryLogs = JSON.parse(fileData);
@@ -58,23 +109,23 @@ async function ensureDbInitialized() {
       }
     } catch {
       // File doesn't exist yet, seed initial access record
-      memoryLogs = [
-        {
-          id: crypto.randomUUID(),
-          timestamp: new Date(Date.now() - 3600000).toISOString(),
-          userId: "108392183928172648102",
-          email: "auditor.compliance@oecd-bilanx.org",
-          name: "European Commission Auditor",
-          picture: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80",
-          authMethod: "google_jwt_verified",
-          action: "LOGIN_SUCCESS",
-          ipAddress: "192.168.1.104",
-          userAgent: "Mozilla/5.0 (European Verification Gateway)",
-          status: "SUCCESS",
-          metadata: { complianceScope: "eIDAS_Article_24", sessionType: "Verified" }
-        }
-      ];
+      const seedLog: AccessLog = {
+        id: crypto.randomUUID(),
+        timestamp: new Date(Date.now() - 3600000).toISOString(),
+        userId: "108392183928172648102",
+        email: "auditor.compliance@oecd-bilanx.org",
+        name: "European Commission Auditor",
+        picture: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80",
+        authMethod: "google_jwt_verified",
+        action: "LOGIN_SUCCESS",
+        ipAddress: "192.168.1.104",
+        userAgent: "Mozilla/5.0 (European Verification Gateway)",
+        status: "SUCCESS",
+        metadata: { complianceScope: "eIDAS_Article_24", sessionType: "Verified" }
+      };
+      memoryLogs = [seedLog];
       await persistLogs();
+      persistToFirestore(seedLog).catch(() => {});
     }
   } catch (err) {
     console.error("[AccessLogDb] Initialization error:", err);
@@ -138,29 +189,12 @@ function schedulePersistLogs() {
   }, 50);
 }
 
-const GCP_PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCP_PROJECT || '';
-const FIRESTORE_DATABASE_ID = process.env.FIRESTORE_DATABASE_ID || '(default)';
-let gcpAuthClient: GoogleAuth | null = null;
-
 async function persistToFirestore(log: AccessLog): Promise<void> {
-  // Only attempt Firestore persistence if in cloud environment or explicitly enabled with a configured project
-  if (!GCP_PROJECT_ID || (!process.env.K_SERVICE && !process.env.FIRESTORE_DATABASE_ID && process.env.USE_FIRESTORE !== 'true')) {
+  if (!isFirestoreEnabled()) {
     return;
   }
 
   try {
-    if (!gcpAuthClient) {
-      gcpAuthClient = new GoogleAuth({
-        scopes: ['https://www.googleapis.com/auth/datastore']
-      });
-    }
-
-    const client = await gcpAuthClient.getClient();
-    const tokenResponse = await client.getAccessToken();
-    const token = tokenResponse.token;
-    if (!token) return;
-
-    // Convert fields to Firestore REST API document format
     const fields: Record<string, any> = {
       id: { stringValue: log.id },
       timestamp: { timestampValue: log.timestamp },
@@ -174,20 +208,14 @@ async function persistToFirestore(log: AccessLog): Promise<void> {
       status: { stringValue: log.status }
     };
 
+    if (log.picture) {
+      fields.picture = { stringValue: log.picture };
+    }
     if (log.metadata) {
       fields.metadata = { stringValue: JSON.stringify(log.metadata) };
     }
 
-    const url = `https://firestore.googleapis.com/v1/projects/${GCP_PROJECT_ID}/databases/${FIRESTORE_DATABASE_ID}/documents/access_logs?documentId=${log.id}`;
-
-    await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ fields })
-    });
+    await firestoreUpsertDocument('access_logs', log.id, fields);
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.warn(`[AccessLogDb] Cloud Firestore async persist skipped: ${errMsg}`);
@@ -330,6 +358,11 @@ export async function clearAccessLogs(): Promise<void> {
   await ensureDbInitialized();
   memoryLogs = [];
   await persistLogs();
+  if (isFirestoreEnabled()) {
+    await firestoreClearCollection('access_logs').catch((err) => {
+      console.warn('[AccessLogDb] Cloud Firestore clear skipped:', err instanceof Error ? err.message : String(err));
+    });
+  }
 }
 
 export async function exportAccessLogsCsv(): Promise<string> {

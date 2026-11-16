@@ -5,7 +5,16 @@
 import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
 import { MemoryDurableMap, openDurableMap, type DurableStore } from './durableStore.ts';
+import {
+  firestoreClearCollection,
+  firestoreDeleteDocument,
+  firestoreListDocuments,
+  firestoreUpsertDocument,
+  isFirestoreEnabled,
+} from './firestoreRest.ts';
 import type { SessionUser } from './types/saml.ts';
+
+const FIRESTORE_SESSIONS_COLLECTION = 'bilanx_sessions';
 
 export class SessionStore {
   declare ['constructor']: typeof SessionStore;
@@ -13,6 +22,7 @@ export class SessionStore {
   private sessions: DurableStore<SessionUser>;
   private defaultTtlMs: number;
   private cleanupInterval: NodeJS.Timeout | null = null;
+  private firestoreHydrated = false;
 
   constructor(defaultTtlMs: number = 4 * 60 * 60 * 1000, storeName?: string) { // 4 hours
     this.defaultTtlMs = defaultTtlMs;
@@ -25,6 +35,56 @@ export class SessionStore {
     }
   }
 
+  private syncSessionToFirestore(token: string, session: SessionUser): void {
+    if (!this.storeName || !isFirestoreEnabled()) return;
+    firestoreUpsertDocument(FIRESTORE_SESSIONS_COLLECTION, token, {
+      token: { stringValue: token },
+      sessionJson: { stringValue: JSON.stringify(session) },
+      expiresAt: { integerValue: String(session.expiresAt) },
+    }).catch((err) => {
+      console.warn('[SessionStore] Firestore upsert skipped:', err instanceof Error ? err.message : String(err));
+    });
+  }
+
+  private deleteSessionFromFirestore(token: string): void {
+    if (!this.storeName || !isFirestoreEnabled()) return;
+    firestoreDeleteDocument(FIRESTORE_SESSIONS_COLLECTION, token).catch((err) => {
+      console.warn('[SessionStore] Firestore delete skipped:', err instanceof Error ? err.message : String(err));
+    });
+  }
+
+  public async hydrateFromFirestore(): Promise<number> {
+    if (!this.storeName || !isFirestoreEnabled() || this.firestoreHydrated) return 0;
+    this.firestoreHydrated = true;
+    try {
+      const docs = await firestoreListDocuments(FIRESTORE_SESSIONS_COLLECTION, 1000);
+      const now = Date.now();
+      let loaded = 0;
+      for (const doc of docs) {
+        const f = doc.fields;
+        const token = f?.token?.stringValue || doc.name.split('/').pop();
+        const raw = f?.sessionJson?.stringValue;
+        if (!token || !raw) continue;
+        try {
+          const parsed = JSON.parse(raw) as SessionUser;
+          if (typeof parsed.expiresAt === 'number' && parsed.expiresAt > now) {
+            this.sessions.set(token, parsed);
+            loaded++;
+          } else {
+            this.deleteSessionFromFirestore(token);
+          }
+        } catch {}
+      }
+      if (loaded > 0) {
+        console.log(`[SessionStore] Hydrated ${loaded} active session(s) from Cloud Firestore.`);
+      }
+      return loaded;
+    } catch (err) {
+      console.warn('[SessionStore] Firestore hydration skipped:', err instanceof Error ? err.message : String(err));
+      return 0;
+    }
+  }
+
   public createSession(userData: Omit<SessionUser, 'expiresAt'>, ttlMs?: number): { token: string; session: SessionUser } {
     const token = crypto.randomUUID();
     const expiresAt = Date.now() + (ttlMs || this.defaultTtlMs);
@@ -33,6 +93,7 @@ export class SessionStore {
       expiresAt,
     };
     this.sessions.set(token, session);
+    this.syncSessionToFirestore(token, session);
     return { token, session };
   }
 
@@ -43,6 +104,7 @@ export class SessionStore {
 
     if (Date.now() > session.expiresAt) {
       this.sessions.delete(token);
+      this.deleteSessionFromFirestore(token);
       return null;
     }
     return session;
@@ -53,10 +115,12 @@ export class SessionStore {
     if (!session) return false;
     session.expiresAt = Date.now() + (extensionMs || this.defaultTtlMs);
     this.sessions.commit(token);
+    this.syncSessionToFirestore(token, session);
     return true;
   }
 
   public deleteSession(token: string): boolean {
+    this.deleteSessionFromFirestore(token);
     return this.sessions.delete(token);
   }
 
@@ -66,6 +130,7 @@ export class SessionStore {
     for (const [token, session] of this.sessions.entries()) {
       if (now > session.expiresAt) {
         this.sessions.delete(token);
+        this.deleteSessionFromFirestore(token);
         pruned++;
       }
     }
@@ -78,6 +143,9 @@ export class SessionStore {
 
   public clear(): void {
     this.sessions.clear();
+    if (this.storeName && isFirestoreEnabled()) {
+      firestoreClearCollection(FIRESTORE_SESSIONS_COLLECTION).catch(() => {});
+    }
   }
 }
 
