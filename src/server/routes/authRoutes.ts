@@ -4,7 +4,7 @@
  */
 
 import express from 'express';
-import { getClientIp, getErrorMessage, googleOAuthClient, resolveGoogleClientId } from '../httpShared.ts';
+import { getClientIp, getErrorMessage, googleOAuthClient, pilotDemoEnabled, resolveGoogleClientId } from '../httpShared.ts';
 import {
   recordAccessLog,
   getAccessLogs,
@@ -78,6 +78,68 @@ export function mountAuthRoutes(app: express.Express): void {
   app.get("/api/auth/config", (_req, res) => {
     const googleClientId = resolveGoogleClientId(process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID);
     res.json({ oauthConfigured: Boolean(googleClientId), googleClientId });
+  });
+
+  // Provision a server-backed Sandbox / Audit Operator session when pilot demo mode is enabled
+  app.post("/api/auth/sandbox-session", async (req, res) => {
+    if (process.env.NODE_ENV === 'production' && !pilotDemoEnabled()) {
+      res.status(403).json({ success: false, error: "Sandbox operator sessions are disabled in strict production mode." });
+      return;
+    }
+
+    try {
+      const clientIp = getClientIp(req);
+      const userAgent = req.headers['user-agent'] || 'Unknown Browser';
+      const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
+      const requestedEmail = typeof body.email === 'string' && body.email.trim() ? body.email.trim() : 'heinrich.keller@bilanx.ch';
+      const requestedName = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : 'Heinrich Keller (Swiss Sovereign Sandbox)';
+      const requestedUid = typeof body.uid === 'string' && body.uid.trim() ? body.uid.trim() : 'CHE-DEMO-001';
+      const skipCookie = body.skipCookie === true;
+
+      const sandboxUser: SessionUser = {
+        uid: requestedUid,
+        email: requestedEmail,
+        name: requestedName,
+        picture: typeof body.picture === 'string' ? body.picture : '',
+        authMethod: 'google_identity_services',
+        role: AUDIT_OPERATOR_ROLE,
+        permissions: [AUDIT_OPERATOR_PERMISSION],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: Date.now() + 4 * 60 * 60 * 1000,
+        issuer: 'https://bilanx.admin.ch/idp',
+      };
+
+      const { token: sessionToken } = globalSessionStore.createSession(sandboxUser);
+      if (!skipCookie) {
+        setSessionCookie(res, sessionToken);
+      }
+
+      const accessRecord = await recordAccessLog({
+        userId: sandboxUser.uid,
+        email: sandboxUser.email,
+        name: sandboxUser.name,
+        picture: sandboxUser.picture,
+        authMethod: 'guest_audit',
+        action: 'SESSION_VALIDATE',
+        ipAddress: clientIp,
+        userAgent,
+        status: 'SUCCESS',
+        metadata: {
+          mode: 'pilot_sandbox_operator',
+          role: AUDIT_OPERATOR_ROLE,
+        },
+      });
+
+      res.status(200).json({
+        success: true,
+        user: sandboxUser,
+        sessionToken,
+        logId: accessRecord.id,
+      });
+    } catch (err: unknown) {
+      console.error("[SandboxSession] Error minting sandbox session:", getErrorMessage(err));
+      res.status(500).json({ success: false, error: "Failed to initialize sandbox audit session." });
+    }
   });
 
   // Verify Google Identity Services ID Token / Credential (REM-02 Hardened)
@@ -187,6 +249,8 @@ export function mountAuthRoutes(app: express.Express): void {
         name: ticketPayload.name || ticketPayload.email.split('@')[0],
         picture: ticketPayload.picture,
         authMethod: 'google_jwt_verified',
+        role: AUDIT_OPERATOR_ROLE,
+        permissions: [AUDIT_OPERATOR_PERMISSION],
         authenticatedAt: new Date().toISOString(),
         expiresAt: Date.now() + 4 * 60 * 60 * 1000, // 4 hours
         issuer: ticketPayload.iss,

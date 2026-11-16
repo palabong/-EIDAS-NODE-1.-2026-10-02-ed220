@@ -4,15 +4,20 @@
 
 import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
+import { MemoryDurableMap, openDurableMap, type DurableStore } from './durableStore.ts';
 import type { SessionUser } from './types/saml.ts';
 
 export class SessionStore {
-  private sessions = new Map<string, SessionUser>();
+  declare ['constructor']: typeof SessionStore;
+  private readonly storeName?: string;
+  private sessions: DurableStore<SessionUser>;
   private defaultTtlMs: number;
   private cleanupInterval: NodeJS.Timeout | null = null;
 
-  constructor(defaultTtlMs: number = 4 * 60 * 60 * 1000) { // 4 hours
+  constructor(defaultTtlMs: number = 4 * 60 * 60 * 1000, storeName?: string) { // 4 hours
     this.defaultTtlMs = defaultTtlMs;
+    this.storeName = storeName;
+    this.sessions = storeName ? openDurableMap<SessionUser>(storeName) : new MemoryDurableMap<SessionUser>();
     // Periodic garbage collection every 10 minutes
     this.cleanupInterval = setInterval(() => this.pruneExpiredSessions(), 10 * 60 * 1000);
     if (this.cleanupInterval.unref) {
@@ -47,6 +52,7 @@ export class SessionStore {
     const session = this.sessions.get(token);
     if (!session) return false;
     session.expiresAt = Date.now() + (extensionMs || this.defaultTtlMs);
+    this.sessions.commit(token);
     return true;
   }
 
@@ -75,7 +81,7 @@ export class SessionStore {
   }
 }
 
-export const globalSessionStore = new SessionStore();
+export const globalSessionStore = new SessionStore(4 * 60 * 60 * 1000, 'sessions');
 
 /**
  * Extracts session token from Cookie header (session_token=...) or Authorization header (Bearer ...) or ?token=...

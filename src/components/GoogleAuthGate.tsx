@@ -237,8 +237,8 @@ export function GoogleAuthGate({
             <button
               type="button"
               id="btn-swiss-demo-bypass"
-              onClick={() => {
-                const demoUser: VerifiedGoogleUser = {
+              onClick={async () => {
+                let demoUser: VerifiedGoogleUser = {
                   uid: 'CHE-DEMO-001',
                   name: 'Heinrich Keller (Swiss Sovereign Sandbox)',
                   email: 'heinrich.keller@bilanx.ch',
@@ -248,6 +248,30 @@ export function GoogleAuthGate({
                   authenticatedAt: new Date().toISOString(),
                   sessionToken: 'DEMO-SWISS-SANDBOX-TOKEN'
                 };
+                try {
+                  const res = await fetch('/api/auth/sandbox-session', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                    body: JSON.stringify({
+                      uid: demoUser.uid,
+                      name: demoUser.name,
+                      email: demoUser.email,
+                    }),
+                  });
+                  if (res.ok) {
+                    const data = await res.json();
+                    if (data?.success && data?.sessionToken) {
+                      demoUser = {
+                        ...demoUser,
+                        ...(data.user || {}),
+                        emailVerified: true,
+                        sessionToken: data.sessionToken,
+                      };
+                    }
+                  }
+                } catch {
+                  // Offline fallback preserves DEMO-SWISS-SANDBOX-TOKEN
+                }
                 localStorage.setItem('bilanx_verified_google_user', JSON.stringify(demoUser));
                 onLoginSuccess(demoUser);
               }}
